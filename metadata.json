@@ -1,0 +1,6 @@
+{
+  "name": "AURA WebAR Menú 3D",
+  "description": "Menú interactivo en Realidad Aumentada y 3D para gastronomía con visualización 360°, desglose de capas (exploded view) y fichas detalladas de ingredientes.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

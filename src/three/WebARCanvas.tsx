@@ -1,0 +1,706 @@
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import * as THREE from 'three';
+import { Dish, Ingredient } from '../types/dish';
+import { buildDish3DModel } from './dishModelBuilder';
+
+interface WebARCanvasProps {
+  dish: Dish;
+  explosionProgress: number; // 0.0 to 1.0
+  selectedIngredientId: string | null;
+  onSelectIngredient: (ingredient: Ingredient | null) => void;
+  isARMode: boolean;
+  show3DPins: boolean;
+  onToggleARMode: (enabled: boolean) => void;
+  excludedIngredientIds?: string[];
+}
+
+interface ProjectedPin {
+  id: string;
+  name: string;
+  categoryLabel: string;
+  icon: string;
+  x: number;
+  y: number;
+  visible: boolean;
+}
+
+export const WebARCanvas: React.FC<WebARCanvasProps> = ({
+  dish,
+  explosionProgress,
+  selectedIngredientId,
+  onSelectIngredient,
+  isARMode,
+  show3DPins,
+  onToggleARMode,
+  excludedIngredientIds = [],
+}) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Scene refs
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const dishGroupRef = useRef<THREE.Group | null>(null);
+  const ingredientMeshesRef = useRef<Map<string, THREE.Object3D>>(new Map());
+  const shadowPlaneRef = useRef<THREE.Mesh | null>(null);
+  const studioFloorRef = useRef<THREE.Group | null>(null);
+  const reticleRef = useRef<THREE.Mesh | null>(null);
+
+  // Interaction & Camera tracking state
+  const isInteractingRef = useRef(false);
+  const pointerStartRef = useRef<{ x: number; y: number; time: number }>({ x: 0, y: 0, time: 0 });
+  const previousTouchDistRef = useRef<number | null>(null);
+  const targetCamPosRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 2.4, 4.8));
+  const targetCamLookAtRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0.4, 0));
+  const currentCamLookAtRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0.4, 0));
+
+  // Spherical orbit values
+  const sphericalRef = useRef({ radius: 5.2, theta: 0.7, phi: 1.15 });
+
+  // 2D Projected spatial pins
+  const [projectedPins, setProjectedPins] = useState<ProjectedPin[]>([]);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [isPlacingOnSurface, setIsPlacingOnSurface] = useState<boolean>(true);
+  const [isARPlaced, setIsARPlaced] = useState<boolean>(false);
+  const [arScale, setArScale] = useState<number>(1.0);
+
+  // Video stream state
+  const streamRef = useRef<MediaStream | null>(null);
+
+  // Setup Camera Video Stream for WebAR
+  useEffect(() => {
+    let active = true;
+
+    async function initCamera() {
+      if (!isARMode) {
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach(track => track.stop());
+          streamRef.current = null;
+        }
+        if (videoRef.current) {
+          videoRef.current.srcObject = null;
+        }
+        setCameraError(null);
+        return;
+      }
+
+      try {
+        setCameraError(null);
+        const constraints: MediaStreamConstraints = {
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        };
+
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (!active) {
+          stream.getTracks().forEach(t => t.stop());
+          return;
+        }
+
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
+        }
+        setIsPlacingOnSurface(true);
+      } catch (err) {
+        console.warn('Camera access could not be acquired:', err);
+        setCameraError('No se pudo acceder a la cámara trasera. Mostrando simulación de entorno AR.');
+      }
+    }
+
+    initCamera();
+
+    return () => {
+      active = false;
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
+      }
+    };
+  }, [isARMode]);
+
+  // Initialize Three.js Scene
+  useEffect(() => {
+    if (!containerRef.current || !canvasRef.current) return;
+
+    const width = containerRef.current.clientWidth || window.innerWidth;
+    const height = containerRef.current.clientHeight || window.innerHeight;
+
+    // Scene
+    const scene = new THREE.Scene();
+    sceneRef.current = scene;
+
+    // Camera
+    const camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 50);
+    camera.position.set(0, 2.4, 4.8);
+    camera.lookAt(0, 0.4, 0);
+    cameraRef.current = camera;
+
+    // Renderer
+    const renderer = new THREE.WebGLRenderer({
+      canvas: canvasRef.current,
+      antialias: true,
+      alpha: true,
+      powerPreference: 'high-performance',
+    });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
+    rendererRef.current = renderer;
+
+    // Lighting Setup - Gastronomic Studio Atmosphere
+    const ambientLight = new THREE.AmbientLight(0xfff7ed, 0.95);
+    scene.add(ambientLight);
+
+    // Key Light with soft shadow casting
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.1);
+    keyLight.position.set(3.5, 6.0, 3.5);
+    keyLight.castShadow = true;
+    keyLight.shadow.mapSize.width = 2048;
+    keyLight.shadow.mapSize.height = 2048;
+    keyLight.shadow.camera.near = 0.5;
+    keyLight.shadow.camera.far = 16;
+    keyLight.shadow.camera.left = -4;
+    keyLight.shadow.camera.right = 4;
+    keyLight.shadow.camera.top = 4;
+    keyLight.shadow.camera.bottom = -4;
+    keyLight.shadow.bias = -0.0004;
+    scene.add(keyLight);
+
+    // Warm Rim light for appetizing highlights on meat and glaze
+    const rimLight = new THREE.DirectionalLight(0xfbbf24, 1.3);
+    rimLight.position.set(-4.0, 3.5, -3.5);
+    scene.add(rimLight);
+
+    // Front soft fill light
+    const fillLight = new THREE.DirectionalLight(0xe0e7ff, 0.65);
+    fillLight.position.set(0, 1.5, 4.5);
+    scene.add(fillLight);
+
+    // AR Shadow Catcher Plane (invisible surface that catches real-time shadows onto physical table)
+    const shadowPlaneGeo = new THREE.PlaneGeometry(12, 12);
+    const shadowPlaneMat = new THREE.ShadowMaterial({ opacity: 0.38 });
+    const shadowPlane = new THREE.Mesh(shadowPlaneGeo, shadowPlaneMat);
+    shadowPlane.rotation.x = -Math.PI / 2;
+    shadowPlane.position.y = -0.01;
+    shadowPlane.receiveShadow = true;
+    scene.add(shadowPlane);
+    shadowPlaneRef.current = shadowPlane;
+
+    // Studio Mode Luxury Floor Pedestal
+    const studioFloor = new THREE.Group();
+    const pedestalGeo = new THREE.CylinderGeometry(2.8, 3.1, 0.15, 48);
+    const pedestalMat = new THREE.MeshStandardMaterial({
+      color: 0x14171d,
+      roughness: 0.75,
+      metalness: 0.3,
+    });
+    const pedestalMesh = new THREE.Mesh(pedestalGeo, pedestalMat);
+    pedestalMesh.position.y = -0.075;
+    pedestalMesh.receiveShadow = true;
+    studioFloor.add(pedestalMesh);
+
+    // Subtle golden rim ring on pedestal
+    const ringGeo = new THREE.TorusGeometry(2.8, 0.02, 8, 48);
+    const ringMat = new THREE.MeshStandardMaterial({
+      color: 0xd97706,
+      roughness: 0.3,
+      metalness: 0.8,
+    });
+    const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+    ringMesh.rotation.x = Math.PI / 2;
+    ringMesh.position.y = 0.001;
+    studioFloor.add(ringMesh);
+
+    // Circular grid markings
+    const gridHelper = new THREE.PolarGridHelper(3.8, 12, 4, 32, 0x334155, 0x1e293b);
+    gridHelper.position.y = -0.08;
+    studioFloor.add(gridHelper);
+
+    scene.add(studioFloor);
+    studioFloorRef.current = studioFloor;
+
+    // AR Placement Reticle (for targeting table surface before anchoring)
+    const reticleGroup = new THREE.Group();
+    const reticleRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.85, 0.95, 32),
+      new THREE.MeshBasicMaterial({ color: 0xf59e0b, side: THREE.DoubleSide, transparent: true, opacity: 0.85 })
+    );
+    reticleRing.rotation.x = -Math.PI / 2;
+    reticleGroup.add(reticleRing);
+
+    const reticleCenter = new THREE.Mesh(
+      new THREE.CircleGeometry(0.12, 16),
+      new THREE.MeshBasicMaterial({ color: 0xf59e0b, side: THREE.DoubleSide, transparent: true, opacity: 0.9 })
+    );
+    reticleCenter.rotation.x = -Math.PI / 2;
+    reticleGroup.add(reticleCenter);
+    reticleGroup.position.y = 0.01;
+    reticleGroup.visible = false;
+    scene.add(reticleGroup);
+    reticleRef.current = reticleGroup as unknown as THREE.Mesh;
+
+    // Window resize handler
+    const handleResize = () => {
+      if (!containerRef.current || !rendererRef.current || !cameraRef.current) return;
+      const w = containerRef.current.clientWidth;
+      const h = containerRef.current.clientHeight;
+      cameraRef.current.aspect = w / h;
+      cameraRef.current.updateProjectionMatrix();
+      rendererRef.current.setSize(w, h);
+    };
+    window.addEventListener('resize', handleResize);
+
+    // Animation Loop
+    let animationFrameId: number;
+    let clock = new THREE.Clock();
+
+    const animate = () => {
+      animationFrameId = requestAnimationFrame(animate);
+      const elapsedTime = clock.getElapsedTime();
+
+      // Smooth camera interpolation towards spherical target
+      const s = sphericalRef.current;
+      const targetX = targetCamLookAtRef.current.x + s.radius * Math.sin(s.phi) * Math.sin(s.theta);
+      const targetY = targetCamLookAtRef.current.y + s.radius * Math.cos(s.phi);
+      const targetZ = targetCamLookAtRef.current.z + s.radius * Math.sin(s.phi) * Math.cos(s.theta);
+
+      targetCamPosRef.current.set(targetX, targetY, targetZ);
+
+      if (cameraRef.current) {
+        cameraRef.current.position.lerp(targetCamPosRef.current, 0.08);
+        currentCamLookAtRef.current.lerp(targetCamLookAtRef.current, 0.08);
+        cameraRef.current.lookAt(currentCamLookAtRef.current);
+      }
+
+      // Reticle pulse animation in AR mode
+      if (reticleRef.current && reticleRef.current.visible) {
+        const pulse = 1 + Math.sin(elapsedTime * 4) * 0.08;
+        reticleRef.current.scale.set(pulse, 1, pulse);
+      }
+
+      // Subtle levitation breath on exploded layers to give physical floating feel
+      if (dishGroupRef.current && explosionProgress > 0.05) {
+        ingredientMeshesRef.current.forEach((obj, id) => {
+          const ing = dish.ingredients.find(i => i.id === id);
+          if (ing && ing.explodedPosition) {
+            const floatOffset = Math.sin(elapsedTime * 2.2 + ing.layerOrder * 0.7) * 0.02 * explosionProgress;
+            // Only add subtle y wobble
+            const targetY = ing.assembledPosition[1] + (ing.explodedPosition[1] - ing.assembledPosition[1]) * explosionProgress;
+            obj.position.y = targetY + floatOffset;
+          }
+        });
+      }
+
+      // Render
+      if (rendererRef.current && sceneRef.current && cameraRef.current) {
+        rendererRef.current.render(sceneRef.current, cameraRef.current);
+      }
+
+      // Update 2D screen projected pins
+      if (show3DPins && cameraRef.current && containerRef.current && explosionProgress > 0.25) {
+        const pins: ProjectedPin[] = [];
+        const rect = containerRef.current.getBoundingClientRect();
+
+        ingredientMeshesRef.current.forEach((obj, id) => {
+          const ing = dish.ingredients.find(i => i.id === id);
+          if (!ing || excludedIngredientIds.includes(id) || id === 'ceramic-slate') return;
+
+          const worldPos = new THREE.Vector3();
+          obj.getWorldPosition(worldPos);
+          // Lift pin position slightly above the object
+          worldPos.y += 0.2;
+
+          const screenPos = worldPos.clone().project(cameraRef.current!);
+          // Check if within frustum
+          const visible = screenPos.z < 1.0;
+          const x = (screenPos.x * 0.5 + 0.5) * rect.width;
+          const y = (-screenPos.y * 0.5 + 0.5) * rect.height;
+
+          pins.push({
+            id: ing.id,
+            name: ing.name,
+            categoryLabel: ing.categoryLabel,
+            icon: ing.icon,
+            x,
+            y,
+            visible,
+          });
+        });
+
+        setProjectedPins(pins);
+      } else {
+        setProjectedPins([]);
+      }
+    };
+
+    animate();
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      cancelAnimationFrame(animationFrameId);
+      renderer.dispose();
+    };
+  }, [dish.id]);
+
+  // Update Dish 3D Model when dish changes or exclusions change
+  useEffect(() => {
+    if (!sceneRef.current) return;
+
+    if (dishGroupRef.current) {
+      sceneRef.current.remove(dishGroupRef.current);
+      dishGroupRef.current.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh) {
+          const m = child as THREE.Mesh;
+          m.geometry?.dispose();
+          if (Array.isArray(m.material)) {
+            m.material.forEach(mat => mat.dispose());
+          } else {
+            m.material?.dispose();
+          }
+        }
+      });
+    }
+
+    const { group, ingredientMeshes } = buildDish3DModel(dish);
+    dishGroupRef.current = group;
+    ingredientMeshesRef.current = ingredientMeshes;
+    sceneRef.current.add(group);
+  }, [dish]);
+
+  // Update Visibility of Excluded Ingredients (e.g. "Sin pepinillo" customizer)
+  useEffect(() => {
+    ingredientMeshesRef.current.forEach((mesh, id) => {
+      const isExcluded = excludedIngredientIds.includes(id);
+      mesh.visible = !isExcluded;
+    });
+  }, [excludedIngredientIds]);
+
+  // Update Studio vs. AR Floor visibility
+  useEffect(() => {
+    if (studioFloorRef.current) {
+      studioFloorRef.current.visible = !isARMode;
+    }
+    if (shadowPlaneRef.current) {
+      shadowPlaneRef.current.visible = true; // Still catches shadows in both
+    }
+    if (reticleRef.current) {
+      reticleRef.current.visible = isARMode && isPlacingOnSurface;
+    }
+  }, [isARMode, isPlacingOnSurface]);
+
+  // Update Exploded Positions Interpolation
+  useEffect(() => {
+    dish.ingredients.forEach((ing) => {
+      const mesh = ingredientMeshesRef.current.get(ing.id);
+      if (!mesh) return;
+
+      const [ax, ay, az] = ing.assembledPosition;
+      const [ex, ey, ez] = ing.explodedPosition;
+
+      // Position lerp
+      mesh.position.x = ax + (ex - ax) * explosionProgress;
+      mesh.position.y = ay + (ey - ay) * explosionProgress;
+      mesh.position.z = az + (ez - az) * explosionProgress;
+
+      // Slight rotation flare when exploded to showcase interior faces
+      if (explosionProgress > 0.01) {
+        if (ing.id === 'bun-top') {
+          mesh.rotation.x = -0.15 * explosionProgress;
+          mesh.rotation.z = 0.1 * explosionProgress;
+        } else if (ing.id === 'tomato-heirloom') {
+          mesh.rotation.x = 0.12 * explosionProgress;
+        } else if (ing.id === 'french-fries') {
+          mesh.rotation.y = 0.25 * explosionProgress;
+        }
+      } else {
+        mesh.rotation.set(0, 0, 0);
+      }
+    });
+  }, [explosionProgress, dish]);
+
+  // Focus Camera on Selected Ingredient or reset to global
+  useEffect(() => {
+    if (!selectedIngredientId) {
+      // Global overview
+      targetCamLookAtRef.current.set(0, 0.4, 0);
+      sphericalRef.current.radius = isARMode ? 4.6 : 5.2;
+      return;
+    }
+
+    const selectedIng = dish.ingredients.find(i => i.id === selectedIngredientId);
+    if (!selectedIng) return;
+
+    // Calculate current position of the ingredient based on explosion progress
+    const [ax, ay, az] = selectedIng.assembledPosition;
+    const [ex, ey, ez] = selectedIng.explodedPosition;
+    const curY = ay + (ey - ay) * explosionProgress;
+    const curX = ax + (ex - ax) * explosionProgress;
+    const curZ = az + (ez - az) * explosionProgress;
+
+    targetCamLookAtRef.current.set(curX, curY + 0.1, curZ);
+    sphericalRef.current.radius = 3.2; // Closer inspection distance
+  }, [selectedIngredientId, explosionProgress, dish, isARMode]);
+
+  // Raycasting for clicking 3D ingredients
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    isInteractingRef.current = true;
+    pointerStartRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      time: Date.now(),
+    };
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isInteractingRef.current) {
+      // Mouse hover raycast for cursor pointer
+      if (!containerRef.current || !cameraRef.current || !dishGroupRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(mouse, cameraRef.current);
+      const intersects = raycaster.intersectObjects(dishGroupRef.current.children, true);
+
+      if (containerRef.current) {
+        containerRef.current.style.cursor = intersects.length > 0 ? 'pointer' : 'grab';
+      }
+      return;
+    }
+
+    const dx = e.clientX - pointerStartRef.current.x;
+    const dy = e.clientY - pointerStartRef.current.y;
+
+    // Orbit rotation sensitivity
+    const rotSpeed = 0.0065;
+    sphericalRef.current.theta -= dx * rotSpeed;
+    sphericalRef.current.phi = Math.max(0.2, Math.min(Math.PI / 2 - 0.05, sphericalRef.current.phi - dy * rotSpeed));
+
+    pointerStartRef.current.x = e.clientX;
+    pointerStartRef.current.y = e.clientY;
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const elapsed = Date.now() - pointerStartRef.current.time;
+    const moveDist = Math.hypot(
+      e.clientX - pointerStartRef.current.x,
+      e.clientY - pointerStartRef.current.y
+    );
+
+    isInteractingRef.current = false;
+
+    // If it was a quick tap/click without dragging, perform Raycast Selection
+    if (elapsed < 300 && moveDist < 8) {
+      performClickRaycast(e.clientX, e.clientY);
+    }
+  };
+
+  // Touch handlers for multi-touch pinch to zoom & AR placement
+  const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length === 2) {
+      const touch1 = e.touches[0];
+      const touch2 = e.touches[1];
+      const dist = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY);
+
+      if (previousTouchDistRef.current !== null) {
+        const delta = dist - previousTouchDistRef.current;
+        sphericalRef.current.radius = Math.max(2.2, Math.min(8.5, sphericalRef.current.radius - delta * 0.012));
+      }
+      previousTouchDistRef.current = dist;
+    }
+  };
+
+  const handleTouchEnd = () => {
+    previousTouchDistRef.current = null;
+  };
+
+  // Wheel to zoom
+  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    sphericalRef.current.radius = Math.max(
+      2.2,
+      Math.min(8.5, sphericalRef.current.radius + e.deltaY * 0.003)
+    );
+  };
+
+  const performClickRaycast = (clientX: number, clientY: number) => {
+    if (!containerRef.current || !cameraRef.current || !dishGroupRef.current) return;
+
+    const rect = containerRef.current.getBoundingClientRect();
+    const mouse = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, cameraRef.current);
+    const intersects = raycaster.intersectObjects(dishGroupRef.current.children, true);
+
+    if (intersects.length > 0) {
+      // Walk up the parent hierarchy to locate user data ingredientId
+      let current: THREE.Object3D | null = intersects[0].object;
+      let foundId: string | null = null;
+
+      while (current && current !== dishGroupRef.current) {
+        if (current.userData && current.userData.ingredientId) {
+          foundId = current.userData.ingredientId;
+          break;
+        }
+        current = current.parent;
+      }
+
+      if (foundId) {
+        const matched = dish.ingredients.find(i => i.id === foundId);
+        if (matched) {
+          onSelectIngredient(matched);
+          return;
+        }
+      }
+    }
+
+    // Tapping background or empty space deselects ingredient
+    onSelectIngredient(null);
+  };
+
+  // Handle AR Surface Anchor Lock
+  const handleAnchorARPlate = () => {
+    setIsPlacingOnSurface(false);
+    setIsARPlaced(true);
+  };
+
+  const handleResetARAnchor = () => {
+    setIsPlacingOnSurface(true);
+    setIsARPlaced(false);
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      id="webar-3d-viewport"
+      className="relative w-full h-full select-none overflow-hidden touch-none"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      onWheel={handleWheel}
+    >
+      {/* Video Stream for WebAR Camera Passthrough */}
+      {isARMode && (
+        <video
+          ref={videoRef}
+          id="webar-camera-video"
+          playsInline
+          autoPlay
+          muted
+          className="absolute inset-0 w-full h-full object-cover z-0 pointer-events-none filter brightness-95 contrast-105"
+        />
+      )}
+
+      {/* Camera error / fallback notification banner */}
+      {isARMode && cameraError && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-20 bg-amber-950/90 border border-amber-500/40 text-amber-200 px-4 py-2.5 rounded-xl text-xs max-w-sm text-center shadow-2xl backdrop-blur-md">
+          <p className="font-semibold mb-1">Cámara WebAR</p>
+          <p className="text-amber-300/80">{cameraError}</p>
+        </div>
+      )}
+
+      {/* WebGL 3D Canvas */}
+      <canvas
+        ref={canvasRef}
+        id="gastronomy-webgl-canvas"
+        className="absolute inset-0 w-full h-full z-10 block"
+      />
+
+      {/* 3D Spatial Floating Pins (HUD Overlay) */}
+      {show3DPins && explosionProgress > 0.25 && (
+        <div className="absolute inset-0 pointer-events-none z-20 overflow-hidden">
+          {projectedPins.map((pin) => {
+            if (!pin.visible) return null;
+            const isSelected = pin.id === selectedIngredientId;
+
+            return (
+              <button
+                key={pin.id}
+                id={`spatial-pin-${pin.id}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const ing = dish.ingredients.find(i => i.id === pin.id);
+                  if (ing) onSelectIngredient(ing);
+                }}
+                style={{
+                  transform: `translate(${pin.x}px, ${pin.y}px) translate(-50%, -50%)`,
+                }}
+                className={`pointer-events-auto absolute transition-all duration-200 group flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium backdrop-blur-md shadow-lg border ${
+                  isSelected
+                    ? 'bg-amber-500 text-stone-950 border-amber-300 scale-110 shadow-amber-500/30'
+                    : 'bg-stone-900/85 hover:bg-stone-800 text-stone-200 border-white/15 hover:border-amber-500/50 hover:scale-105'
+                }`}
+              >
+                <span className="text-sm">{pin.icon}</span>
+                <span className="truncate max-w-[110px] sm:max-w-[140px]">{pin.name}</span>
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    isSelected ? 'bg-stone-950 animate-ping' : 'bg-amber-400'
+                  }`}
+                />
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* AR Surface Targeting & Placement Bar */}
+      {isARMode && isPlacingOnSurface && (
+        <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-3">
+          <div className="bg-stone-900/90 backdrop-blur-md border border-amber-500/30 px-4 py-2 rounded-full text-xs text-amber-200 shadow-xl flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
+            <span>Apunta la cámara a tu mesa o mantel</span>
+          </div>
+          <button
+            id="anchor-plate-button"
+            onClick={handleAnchorARPlate}
+            className="px-6 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-stone-950 font-semibold text-sm rounded-full shadow-lg shadow-amber-500/25 transition-all transform active:scale-95 flex items-center gap-2 border border-amber-300/40"
+          >
+            <span>Fijar Plato en Superficie</span>
+            <span className="text-base">📍</span>
+          </button>
+        </div>
+      )}
+
+      {/* AR Relocate button if already anchored */}
+      {isARMode && !isPlacingOnSurface && (
+        <button
+          id="reanchor-ar-button"
+          onClick={handleResetARAnchor}
+          className="absolute top-20 right-4 z-20 px-3 py-1.5 bg-stone-900/80 hover:bg-stone-800 border border-white/15 backdrop-blur-md rounded-xl text-xs text-stone-300 transition-all flex items-center gap-1.5"
+        >
+          <span>Mover a otra mesa</span>
+          <span className="text-amber-400">↻</span>
+        </button>
+      )}
+
+      {/* Quick Camera Hint helper */}
+      <div className="absolute bottom-4 left-4 z-20 pointer-events-none hidden sm:flex items-center gap-2 bg-stone-900/70 backdrop-blur-sm border border-white/10 px-3 py-1.5 rounded-lg text-[11px] text-stone-400">
+        <span>Arrastra para rotar 360°</span>
+        <span>•</span>
+        <span>Rueda o pellizca para zoom</span>
+        <span>•</span>
+        <span className="text-amber-400">Toca capas para inspeccionar</span>
+      </div>
+    </div>
+  );
+};
