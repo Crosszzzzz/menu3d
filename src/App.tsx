@@ -21,6 +21,11 @@ export default function App() {
   const [showHelpToast, setShowHelpToast] = useState<boolean>(true);
   // Sheet peek (false = 42dvh) vs expanded (true = 70dvh) for canvas framing.
   const [isSheetExpanded, setIsSheetExpanded] = useState<boolean>(false);
+  // Continuous drag overrides (session state only): visible fraction for the
+  // bottom sheet (1 - sheetDvh/100) and top fraction for the layers panel.
+  // Null = snap defaults. Cleared on close/reset to restore peek/top-expanded.
+  const [sheetVisibleOverride, setSheetVisibleOverride] = useState<number | null>(null);
+  const [topHeightOverride, setTopHeightOverride] = useState<number | null>(null);
   // Top layers card open state (mobile portrait). Reported by ExplodedControls:
   // true = expanded panel visible (~40-50% viewport height), false = collapsed pill.
   const [isTopPanelOpen, setIsTopPanelOpen] = useState<boolean>(true);
@@ -67,7 +72,10 @@ export default function App() {
 
   const handleSelectIngredient = (ingredient: Ingredient | null) => {
     setSelectedIngredient(ingredient);
-    if (!ingredient) setIsSheetExpanded(false);
+    if (!ingredient) {
+      setIsSheetExpanded(false);
+      setSheetVisibleOverride(null);
+    }
     // If not exploded yet and an ingredient is selected, gently separate layers to show context
     if (ingredient && explosionProgress < 0.4) {
       tweenExplosion(0.75, 600);
@@ -79,6 +87,8 @@ export default function App() {
     setSelectedIngredient(null);
     setExplosionProgress(0.0);
     setExcludedIngredientIds([]);
+    setSheetVisibleOverride(null);
+    setTopHeightOverride(null);
   };
 
   const handleToggleExclude = (ingredientId: string) => {
@@ -116,12 +126,14 @@ export default function App() {
           sheetOpen={selectedIngredient !== null}
           modalOpen={isStoryModalOpen || isOrderModalOpen}
           visibleHeightFraction={
-            selectedIngredient !== null ? (isSheetExpanded ? 0.3 : 0.58) : 1.0
+            selectedIngredient !== null
+              ? (sheetVisibleOverride ?? (isSheetExpanded ? 0.3 : 0.58))
+              : 1.0
           }
           topPanelOpen={isTopPanelOpen}
           topHeightFraction={
             isTopPanelOpen
-              ? 0.42 + (showHelpToast && selectedIngredient === null ? 0.12 : 0)
+              ? (topHeightOverride ?? (0.42 + (showHelpToast && selectedIngredient === null ? 0.12 : 0)))
               : 0
           }
         />
@@ -152,18 +164,20 @@ export default function App() {
           hasTopBanner={showHelpToast && selectedIngredient === null}
           isSheetOpen={selectedIngredient !== null}
           onTopPanelOpenChange={setIsTopPanelOpen}
+          onTopHeightChange={setTopHeightOverride}
         />
 
         {/* Ingredient Detail Modal (UI Overlay when selected) */}
         <IngredientModal
           ingredient={selectedIngredient}
           dish={currentDish}
-          onClose={() => setSelectedIngredient(null)}
+          onClose={() => handleSelectIngredient(null)}
           onSelectIngredient={(ing) => setSelectedIngredient(ing)}
           onReassemble={handleReassemble}
           isExcluded={selectedIngredient ? excludedIngredientIds.includes(selectedIngredient.id) : false}
           onToggleExclude={handleToggleExclude}
           onExpandChange={setIsSheetExpanded}
+          onHeightChange={setSheetVisibleOverride}
         />
 
         {/* Floating Quick Action: Reassemble pill if exploded & card closed */}

@@ -1,6 +1,11 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Dish, Ingredient } from '../types/dish';
 import { Layers, Minimize2, Maximize2, Tag, Sliders, ChevronUp, ChevronDown } from 'lucide-react';
+import { setCardResizing } from '../utils/resizeGuard';
+
+/** Top panel drag range: 120px min .. 70dvh max. Null = default auto height. */
+export const TOP_MIN_PX = 120;
+export const TOP_MAX_DVH = 70;
 
 interface ExplodedControlsProps {
   dish: Dish;
@@ -18,6 +23,8 @@ interface ExplodedControlsProps {
   isSheetOpen?: boolean;
   /** Notifies parent when the expanded top panel opens/closes (mobile portrait framing). */
   onTopPanelOpenChange?: (open: boolean) => void;
+  /** Continuous height report (top fraction 0..0.7, or null = default) so WebARCanvas follows the drag live. */
+  onTopHeightChange?: (fraction: number | null) => void;
 }
 
 export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
@@ -33,15 +40,34 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
   hasTopBanner = false,
   isSheetOpen = false,
   onTopPanelOpenChange,
+  onTopHeightChange,
 }) => {
   const isExploded = explosionProgress > 0.05;
   const percentage = Math.round(explosionProgress * 100);
   // On mobile while the sheet is open, collapse to a floating pill by default.
   // The user can explicitly expand; closing the sheet resets to full panel.
   const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
+  // User-dragged top panel height (dvh). Null = default auto. Kept while the
+  // session lasts; cleared on sheet close / dish switch (restore defaults).
+  const [topDvh, setTopDvh] = useState<number | null>(null);
+  const [isDraggingTop, setIsDraggingTop] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const topDragRef = useRef<{ startY: number; startH: number; pointerId: number } | null>(null);
+  const topHeightRef = useRef(onTopHeightChange);
+  topHeightRef.current = onTopHeightChange;
   useEffect(() => {
-    if (!isSheetOpen) setMobilePanelOpen(false);
+    if (!isSheetOpen) {
+      setMobilePanelOpen(false);
+      setTopDvh(null);
+      topHeightRef.current?.(null);
+    }
   }, [isSheetOpen]);
+  // New dish restores defaults.
+  useEffect(() => {
+    setTopDvh(null);
+    topHeightRef.current?.(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dish.id]);
   const showCollapsedPill = isSheetOpen && !mobilePanelOpen;
   // Expanded full panel occludes the canvas top on mobile portrait; the
   // collapsed pill (~44px) does not. Report so WebARCanvas can shift the
@@ -50,6 +76,83 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
   useEffect(() => {
     onTopPanelOpenChange?.(topPanelOpen);
   }, [topPanelOpen, onTopPanelOpenChange]);
+
+  // Effective dragged height for the slider semantics (default ~42dvh area
+  // matches the framing assumption until the user drags).
+  const effectiveTopDvh = topDvh ?? 42;
+
+  const viewportHTop = () =>
+    (typeof window !== 'undefined' && window.visualViewport?.height) ||
+    (typeof window !== 'undefined' && window.innerHeight) ||
+    800;
+
+  const clampTopDvh = (dvh: number, vh: number) => {
+    const minDvh = (TOP_MIN_PX / vh) * 100;
+    return Math.max(minDvh, Math.min(TOP_MAX_DVH, dvh));
+  };
+
+  const applyTopDvh = (dvh: number) => {
+    const clamped = clampTopDvh(dvh, viewportHTop());
+    setTopDvh(clamped);
+    topHeightRef.current?.(clamped / 100);
+  };
+
+  const beginTopDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    // Only the bottom-edge handle starts a resize — canvas gestures ignored.
+    e.stopPropagation();
+    e.preventDefault();
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    // Measure live height so grabbing never jumps.
+    const vh = viewportHTop();
+    const rectH = panelRef.current?.getBoundingClientRect().height ?? (effectiveTopDvh / 100) * vh;
+    const startH = topDvh ?? (rectH / vh) * 100;
+    topDragRef.current = { startY: e.clientY, startH, pointerId: e.pointerId };
+    setIsDraggingTop(true);
+    setCardResizing(true);
+  };
+
+  const moveTopDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = topDragRef.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    e.stopPropagation();
+    // Drag down grows the top panel.
+    const deltaDvh = ((e.clientY - d.startY) / viewportHTop()) * 100;
+    applyTopDvh(d.startH + deltaDvh);
+  };
+
+  const endTopDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = topDragRef.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    e.stopPropagation();
+    topDragRef.current = null;
+    setIsDraggingTop(false);
+    setCardResizing(false);
+    // On release the dragged position is kept (session persist).
+  };
+
+  const handleTopKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = e.shiftKey ? 10 : 4;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      applyTopDvh(effectiveTopDvh + step);
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      applyTopDvh(effectiveTopDvh - step);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      applyTopDvh((TOP_MIN_PX / viewportHTop()) * 100);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      applyTopDvh(TOP_MAX_DVH);
+    } else if (e.key === 'Escape' && isSheetOpen) {
+      e.stopPropagation();
+      setMobilePanelOpen(false);
+    }
+  };
 
   return (
     <div
@@ -79,7 +182,11 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
       )}
 
       {/* Primary Floating Action: Explode ↔ Reassemble Toggle */}
-      <div className={`pointer-events-auto overlay-panel bg-stone-900/90 backdrop-blur-xl border border-stone-700/60 rounded-2xl p-3 shadow-2xl flex-col gap-2.5 w-full sm:w-[320px] max-h-[calc(100dvh-220px)] sm:max-h-none overflow-y-auto custom-scrollbar ${showCollapsedPill ? 'hidden sm:flex' : 'flex'}`}>
+      <div
+        ref={panelRef}
+        className={`pointer-events-auto overlay-panel bg-stone-900/90 backdrop-blur-xl border border-stone-700/60 rounded-2xl p-3 shadow-2xl flex-col gap-2.5 w-full sm:w-[320px] sm:max-h-none overflow-y-auto custom-scrollbar ${showCollapsedPill ? 'hidden sm:flex' : 'flex'} ${topDvh == null ? 'max-h-[calc(100dvh-220px)]' : ''}`}
+        style={topDvh != null ? { maxHeight: `${topDvh}dvh`, minHeight: TOP_MIN_PX } : undefined}
+      >
         {/* Collapse back to pill (mobile only, while sheet is open) */}
         {isSheetOpen && (
           <button
@@ -199,6 +306,29 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
           </div>
         </div>
       </div>
+      {/* Drag handle (bottom edge, mobile): drag to resize 120px–70dvh. */}
+      {!showCollapsedPill && (
+        <div
+          role="slider"
+          tabIndex={0}
+          data-resize-handle="top-bottom"
+          aria-label="Arrastrar para ajustar tamaño"
+          aria-valuemin={Math.round((TOP_MIN_PX / (typeof window !== 'undefined' ? window.innerHeight || 800 : 800)) * 100)}
+          aria-valuemax={TOP_MAX_DVH}
+          aria-valuenow={Math.round(effectiveTopDvh)}
+          aria-valuetext={`Panel al ${Math.round(effectiveTopDvh)} por ciento de la pantalla`}
+          aria-orientation="vertical"
+          onPointerDown={beginTopDrag}
+          onPointerMove={moveTopDrag}
+          onPointerUp={endTopDrag}
+          onPointerCancel={endTopDrag}
+          onKeyDown={handleTopKeyDown}
+          className="sm:hidden pointer-events-auto flex justify-center items-center min-h-[44px] -mt-2 cursor-ns-resize touch-none select-none focus-visible:outline-2 focus-visible:outline-amber-500 focus-visible:rounded-xl"
+          style={isDraggingTop ? { touchAction: 'none' } : undefined}
+        >
+          <span className="w-10 h-1.5 rounded-full bg-stone-600" aria-hidden="true" />
+        </div>
+      )}
     </div>
   );
 };

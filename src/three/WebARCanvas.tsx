@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { Dish, Ingredient } from '../types/dish';
 import { buildDish3DModel } from './dishModelBuilder';
+import { isCardResizing } from '../utils/resizeGuard';
 
 interface WebARCanvasProps {
   dish: Dish;
@@ -735,6 +736,9 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     // Let overlay buttons (spatial pins, AR anchor) handle their own press:
     // a pointer starting on a <button> must not start rotate/pinch/tap.
     if ((e.target as HTMLElement).closest?.('button')) return;
+    // Card resize handles own their gesture: never rotate/pinch/tap.
+    if ((e.target as HTMLElement).closest?.('[data-resize-handle]')) return;
+    if (isCardResizing()) return;
     activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     try {
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
@@ -760,6 +764,8 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    // While a card handle is dragged, canvas gestures stay frozen.
+    if (isCardResizing()) return;
     // Hover cursor for mouse when no button is pressed.
     if (!activePointersRef.current.has(e.pointerId)) {
       if (e.pointerType === 'mouse' && e.buttons === 0) {

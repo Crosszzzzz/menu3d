@@ -43,6 +43,25 @@
   .sheet-height-anim {
     transition: max-height 0.3s ease;
   }
+
+  /* Card resize handles: 44px touch target, ns-resize cursor, no scroll fight. */
+  [data-resize-handle] {
+    touch-action: none;
+    cursor: ns-resize;
+  }
+  [data-resize-handle]:focus-visible {
+    outline: 2px solid #f59e0b;
+    outline-offset: -2px;
+    border-radius: 12px;
+  }
+  /* While dragging a handle, freeze height animation for live tracking. */
+  body[data-menu3d-resizing='true'] .sheet-height-anim {
+    transition: none !important;
+  }
+  body[data-menu3d-resizing='true'],
+  body[data-menu3d-resizing='true'] * {
+    user-select: none !important;
+  }
 }
 
 html, body {

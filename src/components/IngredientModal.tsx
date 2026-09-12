@@ -1,6 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Ingredient, Dish } from '../types/dish';
 import { X, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Sparkles, Scale, Flame, ShieldAlert, Award, Compass } from 'lucide-react';
+import { setCardResizing } from '../utils/resizeGuard';
+
+/** Bottom-sheet drag range (dvh). Defaults: peek 42dvh / expanded 70dvh. */
+export const SHEET_MIN_DVH = 28;
+export const SHEET_MAX_DVH = 85;
+const SHEET_PEEK_DVH = 42;
+const SHEET_EXPANDED_DVH = 70;
+/** Above this height the sheet counts as "expanded" for legacy boolean wiring. */
+const SHEET_EXPANDED_THRESHOLD_DVH = 56;
 
 interface IngredientModalProps {
   ingredient: Ingredient | null;
@@ -12,6 +21,8 @@ interface IngredientModalProps {
   onToggleExclude: (id: string) => void;
   /** Notifies parent when peek (false, 42dvh) <-> expanded (true, 70dvh) changes so the 3D canvas can re-frame. */
   onExpandChange?: (expanded: boolean) => void;
+  /** Continuous height report (visible fraction 0..1) so WebARCanvas auto-frame follows the drag live. */
+  onHeightChange?: (visibleFraction: number) => void;
 }
 
 export const IngredientModal: React.FC<IngredientModalProps> = ({
@@ -23,22 +34,132 @@ export const IngredientModal: React.FC<IngredientModalProps> = ({
   isExcluded,
   onToggleExclude,
   onExpandChange,
+  onHeightChange,
 }) => {
   // Compact peek on mobile so the sheet + canvas coexist: collapsed ~42dvh
   // leaves the top ~30%+ of a 360-390px viewport visible for product context.
   // Desktop (sm+) keeps the floating card behaviour via sm:max-h.
   const [isExpanded, setIsExpanded] = useState(false);
+  // User-dragged height (dvh). Null = snap default from isExpanded.
+  // Kept while the sheet is open (even across ingredient switches);
+  // cleared on close so reopen restores the peek default.
+  const [sheetDvh, setSheetDvh] = useState<number | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragRef = useRef<{ startY: number; startH: number; moved: boolean; pointerId: number } | null>(null);
+  const heightRef = useRef(onHeightChange);
+  heightRef.current = onHeightChange;
 
-  // Reset to compact peek whenever a different ingredient is selected.
+  const effectiveDvh = sheetDvh ?? (isExpanded ? SHEET_EXPANDED_DVH : SHEET_PEEK_DVH);
+
+  // Reset to compact peek only when the sheet closes (ingredient -> null).
+  // Switching ingredients keeps the last dragged height (session persist).
   const ingredientId = ingredient?.id;
+  const wasOpenRef = useRef(false);
   useEffect(() => {
-    setIsExpanded(false);
+    const open = ingredientId != null;
+    if (!open && wasOpenRef.current) {
+      setSheetDvh(null);
+      setIsExpanded(false);
+    }
+    wasOpenRef.current = open;
   }, [ingredientId]);
 
   // Report peek/expanded to parent for canvas auto-framing (42dvh vs 70dvh).
   useEffect(() => {
     onExpandChange?.(isExpanded);
   }, [isExpanded, onExpandChange]);
+
+  // Report continuous height for live framing.
+  useEffect(() => {
+    if (ingredientId != null) {
+      heightRef.current?.(1 - effectiveDvh / 100);
+    }
+  }, [effectiveDvh, ingredientId]);
+
+  // Esc closes the sheet from anywhere inside it (keyboard a11y).
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    if (ingredientId == null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeRef.current();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [ingredientId]);
+
+  const clampDvh = (v: number) => Math.max(SHEET_MIN_DVH, Math.min(SHEET_MAX_DVH, v));
+
+  const applyDvh = (dvh: number) => {
+    const clamped = clampDvh(dvh);
+    setSheetDvh(clamped);
+    setIsExpanded(clamped > SHEET_EXPANDED_THRESHOLD_DVH);
+    heightRef.current?.(1 - clamped / 100);
+  };
+
+  const viewportH = () =>
+    (typeof window !== 'undefined' && window.visualViewport?.height) ||
+    (typeof window !== 'undefined' && window.innerHeight) ||
+    800;
+
+  const beginSheetDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    // Only the handle starts a resize — inner scroll never fights.
+    e.stopPropagation();
+    e.preventDefault();
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore capture failures */
+    }
+    dragRef.current = { startY: e.clientY, startH: effectiveDvh, moved: false, pointerId: e.pointerId };
+    setIsDragging(true);
+    setCardResizing(true);
+  };
+
+  const moveSheetDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    e.stopPropagation();
+    if (Math.abs(e.clientY - d.startY) > 3) d.moved = true;
+    // Drag up grows the sheet; grab offset tracked so there is no jump.
+    const deltaDvh = ((d.startY - e.clientY) / viewportH()) * 100;
+    applyDvh(d.startH + deltaDvh);
+  };
+
+  const endSheetDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    e.stopPropagation();
+    dragRef.current = null;
+    setIsDragging(false);
+    setCardResizing(false);
+    // Tap (no drag) on the handle keeps the legacy toggle affordance.
+    if (!d.moved) {
+      setSheetDvh(null);
+      setIsExpanded((v) => !v);
+    }
+    // On release the dragged position is kept (session persist).
+  };
+
+  const handleSheetKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = e.shiftKey ? 10 : 4;
+    if (e.key === 'ArrowUp' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      applyDvh(effectiveDvh + step);
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      applyDvh(effectiveDvh - step);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      applyDvh(SHEET_MIN_DVH);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      applyDvh(SHEET_MAX_DVH);
+    } else if (e.key === 'Escape') {
+      e.stopPropagation();
+      onClose();
+    }
+  };
 
   if (!ingredient) return null;
 
@@ -67,17 +188,30 @@ export const IngredientModal: React.FC<IngredientModalProps> = ({
       id="ingredient-detail-overlay"
       className="absolute z-30 inset-x-2 bottom-[calc(0.5rem+env(safe-area-inset-bottom))] sm:inset-x-auto sm:bottom-6 sm:right-6 sm:left-auto sm:w-full sm:max-w-md transition-all transform animate-in slide-in-from-bottom duration-300 pointer-events-auto"
     >
-      <div className={`bg-stone-900/95 rounded-3xl sm:rounded-3xl border border-stone-700/60 shadow-2xl backdrop-blur-xl text-stone-100 border-t-amber-500/30 flex flex-col overflow-hidden sheet-height-anim ${isExpanded ? 'max-h-[70dvh]' : 'max-h-[42dvh]'} sm:max-h-[85vh]}`}>
-        {/* Drag handle (mobile affordance): tap to expand/collapse */}
-        <button
-          type="button"
-          onClick={() => setIsExpanded((v) => !v)}
-          aria-expanded={isExpanded}
-          aria-label={isExpanded ? 'Compactar ficha' : 'Ampliar ficha'}
-          className="pt-2 pb-1 flex justify-center shrink-0 min-h-[24px] cursor-pointer sm:cursor-default"
+      <div
+        className={`bg-stone-900/95 rounded-3xl sm:rounded-3xl border border-stone-700/60 shadow-2xl backdrop-blur-xl text-stone-100 border-t-amber-500/30 flex flex-col overflow-hidden sheet-height-anim ${sheetDvh == null ? (isExpanded ? 'max-h-[70dvh]' : 'max-h-[42dvh]') : ''} sm:max-h-[85vh]`}
+        style={sheetDvh != null ? { maxHeight: `${sheetDvh}dvh`, transition: isDragging ? 'none' : undefined } : undefined}
+      >
+        {/* Drag handle (top edge, mobile): drag to resize 28–85dvh, tap toggles, arrows resize. */}
+        <div
+          role="slider"
+          tabIndex={0}
+          data-resize-handle="sheet-top"
+          aria-label="Arrastrar para ajustar tamaño"
+          aria-valuemin={SHEET_MIN_DVH}
+          aria-valuemax={SHEET_MAX_DVH}
+          aria-valuenow={Math.round(effectiveDvh)}
+          aria-valuetext={`Ficha al ${Math.round(effectiveDvh)} por ciento de la pantalla`}
+          aria-orientation="vertical"
+          onPointerDown={beginSheetDrag}
+          onPointerMove={moveSheetDrag}
+          onPointerUp={endSheetDrag}
+          onPointerCancel={endSheetDrag}
+          onKeyDown={handleSheetKeyDown}
+          className="pt-2 pb-1 px-8 flex justify-center items-center shrink-0 min-h-[44px] cursor-ns-resize touch-none select-none focus-visible:outline-2 focus-visible:outline-amber-500 focus-visible:outline-offset-[-2px] rounded-t-3xl sm:hidden"
         >
-          <span className="w-10 h-1.5 rounded-full bg-stone-700" aria-hidden="true" />
-        </button>
+          <span className="w-10 h-1.5 rounded-full bg-stone-600" aria-hidden="true" />
+        </div>
 
         {/* Scrollable content: text selectable, vertical pan allowed so the
             locked page + touch-none canvas never trap sheet scrolling */}
@@ -102,7 +236,10 @@ export const IngredientModal: React.FC<IngredientModalProps> = ({
               {/* Expand/collapse toggle (mobile only; desktop keeps floating card) */}
               <button
                 id="toggle-sheet-size-button"
-                onClick={() => setIsExpanded((v) => !v)}
+                onClick={() => {
+                  setSheetDvh(null);
+                  setIsExpanded((v) => !v);
+                }}
                 aria-expanded={isExpanded}
                 aria-label={isExpanded ? 'Compactar ficha' : 'Ampliar ficha'}
                 title={isExpanded ? 'Compactar ficha' : 'Ampliar ficha'}
