@@ -54,13 +54,18 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   // - zoom: two-finger pinch or wheel only
   // - tap (<300ms, <8px, no pinch): raycast select/deselect
   // - background single-drag: no-op
+  // Zoom range: min 2.2 keeps close-up detail; max 13 frames the full
+  // exploded stack (y 2.6 to -1.8, fries x 2.2) plus pedestal with margin
+  // on 360px portrait (vertical fit ~10 units, horizontal ~4.9) and desktop.
   const MIN_RADIUS = 2.2;
-  const MAX_RADIUS = 8.5;
+  const MAX_RADIUS = 13;
   const MIN_PHI = 0.2;
   const MAX_PHI = Math.PI / 2 - 0.05;
   const ROT_SPEED = 0.0065;
-  const PINCH_FACTOR = 0.012;
-  const WHEEL_FACTOR = 0.003;
+  // Scaled ~1.5x vs the old 2.2-8.5 range so traversing the wider
+  // 2.2-13 range takes a similar gesture distance as before.
+  const PINCH_FACTOR = 0.018;
+  const WHEEL_FACTOR = 0.0045;
   const TAP_MAX_MS = 300;
   const TAP_MAX_PX = 8;
 
@@ -461,7 +466,8 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   // Focus Camera on Selected Ingredient or reset to global
   useEffect(() => {
     if (!selectedIngredientId) {
-      // Global overview
+      // Global overview: kept at 5.2 (4.6 in AR) inside the 2.2-13 range
+      // to preserve the current framing; users can now zoom out to 13.
       targetCamLookAtRef.current.set(0, 0.4, 0);
       sphericalRef.current.radius = isARMode ? 4.6 : 5.2;
       return;
@@ -478,6 +484,7 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     const curZ = az + (ez - az) * explosionProgress;
 
     targetCamLookAtRef.current.set(curX, curY + 0.1, curZ);
+    // Close inspection distance, kept above MIN_RADIUS 2.2 for detail.
     sphericalRef.current.radius = 3.2; // Closer inspection distance
   }, [selectedIngredientId, explosionProgress, dish, isARMode]);
 

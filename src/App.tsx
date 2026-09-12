@@ -109,7 +109,7 @@ export default function App() {
           excludedIngredientIds={excludedIngredientIds}
         />
 
-        {/* Top Header & Mode Bar */}
+        {/* Top Header & Mode Bar (compact on mobile while sheet is open) */}
         <DishHeader
           currentDish={currentDish}
           allDishes={DISHES_DATA}
@@ -118,6 +118,7 @@ export default function App() {
           onToggleARMode={setIsARMode}
           onOpenOrderModal={() => setIsOrderModalOpen(true)}
           onOpenDishInfoModal={() => setIsStoryModalOpen(true)}
+          compact={selectedIngredient !== null}
         />
 
         {/* Exploded View Controls (Toggle, Slider, Layer Pills) */}
@@ -131,7 +132,8 @@ export default function App() {
           onSelectIngredient={handleSelectIngredient}
           show3DPins={show3DPins}
           onToggle3DPins={() => setShow3DPins(!show3DPins)}
-          hasTopBanner={showHelpToast}
+          hasTopBanner={showHelpToast && selectedIngredient === null}
+          isSheetOpen={selectedIngredient !== null}
         />
 
         {/* Ingredient Detail Modal (UI Overlay when selected) */}
@@ -159,8 +161,8 @@ export default function App() {
           </div>
         )}
 
-        {/* First-time interaction hint toast */}
-        {showHelpToast && (
+        {/* First-time interaction hint toast (hidden while sheet is open so header / controls / sheet / toast never stack full height on mobile) */}
+        {showHelpToast && !selectedIngredient && (
           <div className="absolute z-30 pointer-events-auto inset-x-2 top-[calc(env(safe-area-inset-top)+60px)] sm:inset-x-auto sm:right-4 sm:top-20 sm:max-w-xs bg-stone-900/95 border border-amber-500/30 rounded-2xl p-3.5 shadow-2xl backdrop-blur-xl animate-in fade-in duration-500">
             <div className="flex items-start justify-between gap-2 mb-1">
               <div className="flex items-center gap-1.5 text-xs font-bold text-amber-300">

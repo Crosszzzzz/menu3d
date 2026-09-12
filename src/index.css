@@ -38,6 +38,11 @@
   .overlay-panel {
     touch-action: pan-y;
   }
+
+  /* Bottom-sheet peek/expand animates max-height smoothly. */
+  .sheet-height-anim {
+    transition: max-height 0.3s ease;
+  }
 }
 
 html, body {

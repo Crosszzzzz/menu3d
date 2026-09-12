@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Dish, Ingredient } from '../types/dish';
-import { Layers, Minimize2, Maximize2, Tag, Sliders } from 'lucide-react';
+import { Layers, Minimize2, Maximize2, Tag, Sliders, ChevronUp, ChevronDown } from 'lucide-react';
 
 interface ExplodedControlsProps {
   dish: Dish;
@@ -14,6 +14,8 @@ interface ExplodedControlsProps {
   onToggle3DPins: () => void;
   /** True while the help toast banner is visible; pushes the panel down on mobile so slots never overlap. */
   hasTopBanner?: boolean;
+  /** True while the ingredient bottom-sheet is open; on mobile (<sm) the panel collapses to a floating pill so sheet + canvas coexist. */
+  isSheetOpen?: boolean;
 }
 
 export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
@@ -27,9 +29,17 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
   show3DPins,
   onToggle3DPins,
   hasTopBanner = false,
+  isSheetOpen = false,
 }) => {
   const isExploded = explosionProgress > 0.05;
   const percentage = Math.round(explosionProgress * 100);
+  // On mobile while the sheet is open, collapse to a floating pill by default.
+  // The user can explicitly expand; closing the sheet resets to full panel.
+  const [mobilePanelOpen, setMobilePanelOpen] = useState(false);
+  useEffect(() => {
+    if (!isSheetOpen) setMobilePanelOpen(false);
+  }, [isSheetOpen]);
+  const showCollapsedPill = isSheetOpen && !mobilePanelOpen;
 
   return (
     <div
@@ -40,8 +50,40 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
           : 'top-[calc(env(safe-area-inset-top)+64px)] sm:top-20'
       }`}
     >
+      {/* Collapsed floating pill (mobile only, while sheet is open).
+          Keeps the controls slot to ~44px so header / pill / sheet never
+          triple-stack full height and the canvas stays visible. */}
+      {showCollapsedPill && (
+        <button
+          id="expand-layers-panel-button"
+          type="button"
+          onClick={() => setMobilePanelOpen(true)}
+          aria-expanded="false"
+          aria-label="Mostrar controles de capas"
+          className="sm:hidden pointer-events-auto self-start flex items-center gap-2 min-h-[44px] px-4 py-2.5 bg-stone-900/90 backdrop-blur-xl border border-stone-700/60 rounded-full shadow-2xl text-xs font-semibold text-amber-300 active:scale-95"
+        >
+          <Layers size={14} className="text-amber-400" />
+          <span>Capas • {percentage}%</span>
+          <ChevronUp size={14} className="text-stone-400" />
+        </button>
+      )}
+
       {/* Primary Floating Action: Explode ↔ Reassemble Toggle */}
-      <div className="pointer-events-auto overlay-panel bg-stone-900/90 backdrop-blur-xl border border-stone-700/60 rounded-2xl p-3 shadow-2xl flex flex-col gap-2.5 w-full sm:w-[320px] max-h-[calc(100dvh-220px)] sm:max-h-none overflow-y-auto custom-scrollbar">
+      <div className={`pointer-events-auto overlay-panel bg-stone-900/90 backdrop-blur-xl border border-stone-700/60 rounded-2xl p-3 shadow-2xl flex-col gap-2.5 w-full sm:w-[320px] max-h-[calc(100dvh-220px)] sm:max-h-none overflow-y-auto custom-scrollbar ${showCollapsedPill ? 'hidden sm:flex' : 'flex'}`}>
+        {/* Collapse back to pill (mobile only, while sheet is open) */}
+        {isSheetOpen && (
+          <button
+            id="collapse-layers-panel-button"
+            type="button"
+            onClick={() => setMobilePanelOpen(false)}
+            aria-expanded={mobilePanelOpen}
+            aria-label="Minimizar controles de capas"
+            className="sm:hidden self-end flex items-center gap-1 min-h-[44px] px-3 py-2 text-[11px] font-semibold text-stone-400 hover:text-stone-200"
+          >
+            <span>Minimizar</span>
+            <ChevronDown size={14} />
+          </button>
+        )}
         <div className="flex items-center justify-between gap-2">
           <button
             id="toggle-exploded-state-button"

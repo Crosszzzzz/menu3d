@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Ingredient, Dish } from '../types/dish';
-import { X, ChevronLeft, ChevronRight, Sparkles, Scale, Flame, ShieldAlert, Award, Compass } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Sparkles, Scale, Flame, ShieldAlert, Award, Compass } from 'lucide-react';
 
 interface IngredientModalProps {
   ingredient: Ingredient | null;
@@ -21,6 +21,17 @@ export const IngredientModal: React.FC<IngredientModalProps> = ({
   isExcluded,
   onToggleExclude,
 }) => {
+  // Compact peek on mobile so the sheet + canvas coexist: collapsed ~42dvh
+  // leaves the top ~30%+ of a 360-390px viewport visible for product context.
+  // Desktop (sm+) keeps the floating card behaviour via sm:max-h.
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  // Reset to compact peek whenever a different ingredient is selected.
+  const ingredientId = ingredient?.id;
+  useEffect(() => {
+    setIsExpanded(false);
+  }, [ingredientId]);
+
   if (!ingredient) return null;
 
   // Filter out non-food decorations for previous/next stepping
@@ -48,11 +59,17 @@ export const IngredientModal: React.FC<IngredientModalProps> = ({
       id="ingredient-detail-overlay"
       className="absolute z-30 inset-x-2 bottom-[calc(0.5rem+env(safe-area-inset-bottom))] sm:inset-x-auto sm:bottom-6 sm:right-6 sm:left-auto sm:w-full sm:max-w-md transition-all transform animate-in slide-in-from-bottom duration-300 pointer-events-auto"
     >
-      <div className="bg-stone-900/95 rounded-3xl sm:rounded-3xl border border-stone-700/60 shadow-2xl backdrop-blur-xl text-stone-100 border-t-amber-500/30 flex flex-col overflow-hidden max-h-[58dvh] sm:max-h-[85vh]">
-        {/* Drag handle (mobile affordance) */}
-        <div className="pt-2 pb-1 flex justify-center shrink-0" aria-hidden="true">
-          <span className="w-10 h-1.5 rounded-full bg-stone-700" />
-        </div>
+      <div className={`bg-stone-900/95 rounded-3xl sm:rounded-3xl border border-stone-700/60 shadow-2xl backdrop-blur-xl text-stone-100 border-t-amber-500/30 flex flex-col overflow-hidden sheet-height-anim ${isExpanded ? 'max-h-[70dvh]' : 'max-h-[42dvh]'} sm:max-h-[85vh]}`}>
+        {/* Drag handle (mobile affordance): tap to expand/collapse */}
+        <button
+          type="button"
+          onClick={() => setIsExpanded((v) => !v)}
+          aria-expanded={isExpanded}
+          aria-label={isExpanded ? 'Compactar ficha' : 'Ampliar ficha'}
+          className="pt-2 pb-1 flex justify-center shrink-0 min-h-[24px] cursor-pointer sm:cursor-default"
+        >
+          <span className="w-10 h-1.5 rounded-full bg-stone-700" aria-hidden="true" />
+        </button>
 
         {/* Scrollable content: text selectable, vertical pan allowed so the
             locked page + touch-none canvas never trap sheet scrolling */}
@@ -73,15 +90,28 @@ export const IngredientModal: React.FC<IngredientModalProps> = ({
               </div>
             </div>
 
-            <button
-              id="close-ingredient-card"
-              onClick={onClose}
-              className="min-h-[44px] min-w-[44px] p-2 rounded-full bg-stone-800/80 hover:bg-stone-700 text-stone-400 hover:text-white transition-colors flex items-center justify-center"
-              title="Cerrar ficha"
-              aria-label="Cerrar ficha"
-            >
-              <X size={18} />
-            </button>
+            <div className="flex items-center gap-1.5 shrink-0">
+              {/* Expand/collapse toggle (mobile only; desktop keeps floating card) */}
+              <button
+                id="toggle-sheet-size-button"
+                onClick={() => setIsExpanded((v) => !v)}
+                aria-expanded={isExpanded}
+                aria-label={isExpanded ? 'Compactar ficha' : 'Ampliar ficha'}
+                title={isExpanded ? 'Compactar ficha' : 'Ampliar ficha'}
+                className="sm:hidden min-h-[44px] min-w-[44px] p-2 rounded-full bg-stone-800/80 hover:bg-stone-700 text-stone-400 hover:text-white transition-colors flex items-center justify-center"
+              >
+                {isExpanded ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
+              </button>
+              <button
+                id="close-ingredient-card"
+                onClick={onClose}
+                className="min-h-[44px] min-w-[44px] p-2 rounded-full bg-stone-800/80 hover:bg-stone-700 text-stone-400 hover:text-white transition-colors flex items-center justify-center"
+                title="Cerrar ficha"
+                aria-label="Cerrar ficha"
+              >
+                <X size={18} />
+              </button>
+            </div>
           </div>
 
         {/* Quick Highlights Bar: Gramaje, Calorías, Capa */}

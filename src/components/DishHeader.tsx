@@ -10,6 +10,8 @@ interface DishHeaderProps {
   onToggleARMode: (enabled: boolean) => void;
   onOpenOrderModal: () => void;
   onOpenDishInfoModal: () => void;
+  /** True while the ingredient sheet is open; compacts mobile header so sheet + canvas coexist. */
+  compact?: boolean;
 }
 
 export const DishHeader: React.FC<DishHeaderProps> = ({
@@ -20,6 +22,7 @@ export const DishHeader: React.FC<DishHeaderProps> = ({
   onToggleARMode,
   onOpenOrderModal,
   onOpenDishInfoModal,
+  compact = false,
 }) => {
   return (
     <header
@@ -42,8 +45,8 @@ export const DishHeader: React.FC<DishHeaderProps> = ({
 
           <div className="hidden md:block h-4 w-px bg-stone-700" />
 
-          {/* Dish Switcher Dropdown / Pills */}
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar min-w-0">
+          {/* Dish Switcher Dropdown / Pills (hidden on mobile while sheet is open to compact header) */}
+          <div className={`${compact ? 'hidden sm:flex' : 'flex'} items-center gap-1.5 overflow-x-auto no-scrollbar min-w-0`}>
             {allDishes.map((dish) => {
               const isActive = dish.id === currentDish.id;
               return (
@@ -78,8 +81,8 @@ export const DishHeader: React.FC<DishHeaderProps> = ({
 
       {/* Mode Controls: Estudio 3D ↔ Realidad Aumentada & Order Button */}
       <div className="pointer-events-auto flex items-center gap-2 ml-auto shrink-0">
-        {/* Toggle Mode Segment */}
-        <div className="bg-stone-900/90 backdrop-blur-xl border border-stone-700/60 p-1 rounded-2xl shadow-2xl hidden min-[380px]:flex items-center gap-1">
+        {/* Toggle Mode Segment (hidden on mobile while sheet is open to keep header compact) */}
+        <div className={`bg-stone-900/90 backdrop-blur-xl border border-stone-700/60 p-1 rounded-2xl shadow-2xl items-center gap-1 ${compact ? 'hidden sm:flex' : 'hidden min-[380px]:flex'}`}>
           <button
             id="switch-mode-studio-button"
             onClick={() => onToggleARMode(false)}
