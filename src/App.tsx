@@ -21,6 +21,9 @@ export default function App() {
   const [showHelpToast, setShowHelpToast] = useState<boolean>(true);
   // Sheet peek (false = 42dvh) vs expanded (true = 70dvh) for canvas framing.
   const [isSheetExpanded, setIsSheetExpanded] = useState<boolean>(false);
+  // Top layers card open state (mobile portrait). Reported by ExplodedControls:
+  // true = expanded panel visible (~40-50% viewport height), false = collapsed pill.
+  const [isTopPanelOpen, setIsTopPanelOpen] = useState<boolean>(true);
 
   // Animation frame ref for smooth explosion tweening
   const animFrameRef = useRef<number | null>(null);
@@ -115,6 +118,12 @@ export default function App() {
           visibleHeightFraction={
             selectedIngredient !== null ? (isSheetExpanded ? 0.3 : 0.58) : 1.0
           }
+          topPanelOpen={isTopPanelOpen}
+          topHeightFraction={
+            isTopPanelOpen
+              ? 0.42 + (showHelpToast && selectedIngredient === null ? 0.12 : 0)
+              : 0
+          }
         />
 
         {/* Top Header & Mode Bar (compact on mobile while sheet is open) */}
@@ -142,6 +151,7 @@ export default function App() {
           onToggle3DPins={() => setShow3DPins(!show3DPins)}
           hasTopBanner={showHelpToast && selectedIngredient === null}
           isSheetOpen={selectedIngredient !== null}
+          onTopPanelOpenChange={setIsTopPanelOpen}
         />
 
         {/* Ingredient Detail Modal (UI Overlay when selected) */}

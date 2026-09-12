@@ -16,6 +16,8 @@ interface ExplodedControlsProps {
   hasTopBanner?: boolean;
   /** True while the ingredient bottom-sheet is open; on mobile (<sm) the panel collapses to a floating pill so sheet + canvas coexist. */
   isSheetOpen?: boolean;
+  /** Notifies parent when the expanded top panel opens/closes (mobile portrait framing). */
+  onTopPanelOpenChange?: (open: boolean) => void;
 }
 
 export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
@@ -30,6 +32,7 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
   onToggle3DPins,
   hasTopBanner = false,
   isSheetOpen = false,
+  onTopPanelOpenChange,
 }) => {
   const isExploded = explosionProgress > 0.05;
   const percentage = Math.round(explosionProgress * 100);
@@ -40,6 +43,13 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
     if (!isSheetOpen) setMobilePanelOpen(false);
   }, [isSheetOpen]);
   const showCollapsedPill = isSheetOpen && !mobilePanelOpen;
+  // Expanded full panel occludes the canvas top on mobile portrait; the
+  // collapsed pill (~44px) does not. Report so WebARCanvas can shift the
+  // burger down / center it in the free strip.
+  const topPanelOpen = !showCollapsedPill;
+  useEffect(() => {
+    onTopPanelOpenChange?.(topPanelOpen);
+  }, [topPanelOpen, onTopPanelOpenChange]);
 
   return (
     <div

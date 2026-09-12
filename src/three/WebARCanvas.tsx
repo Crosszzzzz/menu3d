@@ -18,6 +18,10 @@ interface WebARCanvasProps {
   modalOpen?: boolean;
   /** Fraction of canvas height still visible for 3D (0..1). 0.58 = 42dvh peek, 0.30 = 70dvh expanded, 1.0 = closed. */
   visibleHeightFraction?: number;
+  /** True while the top layers card (ExplodedControls expanded panel) occludes the canvas top on mobile. */
+  topPanelOpen?: boolean;
+  /** Fraction of canvas height occluded at the top (0..1). Mobile: ~0.42 expanded panel + ~0.12 toast banner. Ignored when topPanelOpen is false. */
+  topHeightFraction?: number;
 }
 
 interface ProjectedPin {
@@ -42,6 +46,8 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   sheetOpen = false,
   modalOpen = false,
   visibleHeightFraction = 1.0,
+  topPanelOpen = false,
+  topHeightFraction = 0,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -570,13 +576,15 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     sphericalRef.current.radius = isARMode ? 4.6 : 5.2;
   }, [dish.id, isARMode, sheetOpen, modalOpen, selectedIngredientId]);
 
-  // Sheet/modal auto-framing: shift lookAt down (burger up on screen) +
-  // auto dolly-out so the full burger fits the remaining visible space above
-  // the peek sheet / around centered modals. Additive boost => user pinch
-  // after auto-frame always wins (we never overwrite sphericalRef.radius).
-  // Restore on close = lerp boost/shift back to 0 (base untouched).
+  // Sheet/modal/top auto-framing: bottom sheets shift lookAt down (burger
+  // up on screen); top layers card + toast shift lookAt up (burger down into
+  // the lower free space); both open centers the burger in the middle free
+  // strip. Auto dolly-out keeps the full burger fitting the free height.
+  // Additive boost => user pinch after auto-frame always wins (we never
+  // overwrite sphericalRef.radius). Restore on close = lerp boost/shift to 0.
   useEffect(() => {
-    const framingOpen = Boolean(sheetOpen || modalOpen);
+    const hasTop = Boolean(topPanelOpen && (topHeightFraction || 0) > 0.01);
+    const framingOpen = Boolean(sheetOpen || modalOpen || hasTop);
     const wasOpen = prevFramingOpenRef.current;
     const fr = framingRef.current;
 
@@ -606,16 +614,20 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     // cards barely cover height, so dampen the height loss on wide screens.
     const rawSheetF = Math.max(0.2, Math.min(1, visibleHeightFraction || 1));
     const sheetF = aspect >= 1 && sheetOpen ? 1 - (1 - rawSheetF) * 0.25 : rawSheetF;
+    // Top occlusion: mobile portrait full weight (<sm portrait, aspect < 1);
+    // desktop / landscape damped x0.25 so wide layouts stay unchanged.
+    const rawTopF = Math.max(0, Math.min(0.6, topHeightFraction || 0));
+    const tEff = hasTop ? (aspect >= 1 ? rawTopF * 0.25 : rawTopF) : 0;
     // Centered modals dim the canvas: scale down + shift up so the burger
     // peeks in the visible rim instead of hiding fully behind the card.
     const MODAL_F = 0.6;
 
-    let fEff = 1;
-    if (sheetOpen && modalOpen) fEff = Math.min(sheetF, MODAL_F);
-    else if (sheetOpen) fEff = sheetF;
-    else if (modalOpen) fEff = MODAL_F;
+    let fBottom = 1;
+    if (sheetOpen && modalOpen) fBottom = Math.min(sheetF, MODAL_F);
+    else if (sheetOpen) fBottom = sheetF;
+    else if (modalOpen) fBottom = MODAL_F;
 
-    if (modalOpen && !sheetOpen) {
+    if (modalOpen && !sheetOpen && tEff === 0) {
       // Modest context dolly + upward shift for centered cards.
       const modalNeed = 8.5;
       fr.boostTarget = Math.max(0, Math.min(MAX_RADIUS - preOpenBase, modalNeed - preOpenBase));
@@ -624,27 +636,36 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
       return;
     }
 
-    // Full-burger fit in the visible top strip (exploded worst case):
+    // Free middle strip between top occlusion (tEff) and bottom sheet
+    // (1 - fBottom): fFree = fBottom - tEff. Clamped to 0.2 so over-
+    // constrained (expanded sheet + expanded top) still dollies to MAX
+    // best-effort instead of exploding to infinity.
+    const fFree = fBottom - tEff;
+    const fFit = Math.max(0.2, Math.min(1, fFree));
+
+    // Full-burger fit in the free strip (exploded worst case):
     // height 2.6..-1.8 = 4.4 + 0.6 margin = 5.0 (+8% lens margin),
     // width pedestal 5.6 + fries overhang ~0.5 = ~6.1 (+8%).
     const H_OBJ = 5.0 * 1.08;
     const W_OBJ = 6.1 * 1.08;
-    const needH = H_OBJ / (FIT_PER_D * fEff);
+    const needH = H_OBJ / (FIT_PER_D * fFit);
     const needW = aspect > 0 ? W_OBJ / (FIT_PER_D * aspect) : needH;
     const required = Math.max(needH, needW);
     const clampedRequired = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, required));
     fr.boostTarget = Math.max(0, Math.min(MAX_RADIUS - preOpenBase, clampedRequired - preOpenBase));
 
-    // Shift the lookAt down so the burger sits centered in the visible top
-    // strip (visible center is (1-f)/2 above full center). Factor 0.85 leaves
-    // room for the header; clamped so close-ups never fly off-screen.
+    // Combined centering: bottom pushes the free center up (-(1-fBottom)/2),
+    // top pushes it down (+tEff/2). Top-only => positive shift (lookAt up =
+    // burger down); bottom-only => negative (lookAt down = burger up);
+    // both => centered in the middle strip. Factor 0.85 leaves header room;
+    // clamped so close-ups never fly off-screen.
     const effectiveD = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, preOpenBase + fr.boostTarget));
     const visibleFitH = FIT_PER_D * effectiveD;
-    const offsetUp = ((1 - fEff) / 2) * visibleFitH * 0.85;
-    fr.shiftYTarget = Math.max(-2.0, Math.min(0, -offsetUp));
+    const combinedOffset = ((tEff - (1 - fBottom)) / 2) * visibleFitH * 0.85;
+    fr.shiftYTarget = Math.max(-2.0, Math.min(2.0, combinedOffset));
 
     prevFramingOpenRef.current = true;
-  }, [sheetOpen, modalOpen, visibleHeightFraction, dish.id]);
+  }, [sheetOpen, modalOpen, visibleHeightFraction, topPanelOpen, topHeightFraction, dish.id]);
 
   // ---- Gesture helpers (hit-test + clamp) ----
   const clampRadius = (v: number) => Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, v));
