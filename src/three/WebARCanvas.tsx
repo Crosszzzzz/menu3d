@@ -65,26 +65,32 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
 
   // Interaction & Camera tracking state
   // Gesture contract (see header docs):
-  // - rotate: single pointer drag that STARTED on burger/ingredient only
-  // - zoom: two-finger pinch or wheel only
-  // - tap (<300ms, <8px, no pinch): raycast select/deselect
-  // - background single-drag: no-op
-  // Zoom range: min 2.2 keeps close-up detail; max 15.5 frames the full
-  // exploded stack (y 2.6 to -1.8, fries x 2.2) plus pedestal with margin
-  // on 360px portrait (vertical fit ~11.9, visible ~6.9 at max; horizontal
-  // ~5.9) and desktop. Verified: at 15.5, H_fit=11.9 covers the 5.0 stack
-  // in the top 58% (needs ~12.1) and W_fit~5.95 covers the ~5.65 wide
-  // pedestal+fries with ~2% side crop worst-case — acceptable margin.
+  // - rotate: single pointer drag ANYWHERE on canvas (burger OR background)
+  //   changes ONLY theta/phi
+  // - zoom: two-finger pinch or wheel anywhere changes ONLY radius
+  // - tap (<300ms, <8px, no pinch): raycast select (burger) / deselect (background)
+  // - overlay <button>s capture their own press (guarded, never rotate/zoom)
+  // - rotate never zooms, zoom never rotates; select/explode ticks never
+  //   touch radius (radius owned by init + user pinch/wheel + additive boost)
+  // Zoom range: min 2.2 keeps close-up detail; max 18.0 frames the full
+  // upward-only exploded stack (slate base y -0.15, layers 0.5..4.8, bun-top
+  // dome top ~5.67, fries x 2.2) plus pedestal with margin on 360px
+  // portrait (vertical fit ~13.82 at max, visible ~8.0 in the 58% peek free
+  // strip; horizontal ~6.9 at aspect 0.5) and desktop. Verified: at 18.0,
+  // H_fit=13.82 covers the ~5.9 stack +8% margin (~6.37) in the top 58%
+  // (needs ~14.3 incl. width worst-case) and W_fit~6.9 covers the ~5.65
+  // wide pedestal+fries with margin; top-only+toast 46% free needs ~18.05
+  // = MAX best-effort (~0% crop).
   const MIN_RADIUS = 2.2;
-  const MAX_RADIUS = 15.5;
+  const MAX_RADIUS = 18.0;
   const MIN_PHI = 0.2;
   const MAX_PHI = Math.PI / 2 - 0.05;
   const ROT_SPEED = 0.0065;
-  // Scaled proportionally to the wider 2.2-15.5 range (width 13.3 vs 10.8
-  // for 2.2-13 => x1.23): pinch 0.018->0.022, wheel 0.0045->0.0055 so
+  // Scaled proportionally to the wider 2.2-18.0 range (width 15.8 vs 10.8
+  // for 2.2-13 => x1.46): pinch 0.018->0.026, wheel 0.0045->0.0065 so
   // traversing the full range takes a similar gesture distance as before.
-  const PINCH_FACTOR = 0.022;
-  const WHEEL_FACTOR = 0.0055;
+  const PINCH_FACTOR = 0.026;
+  const WHEEL_FACTOR = 0.0065;
   const TAP_MAX_MS = 300;
   const TAP_MAX_PX = 8;
 
@@ -629,7 +635,9 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
 
     if (modalOpen && !sheetOpen && tEff === 0) {
       // Modest context dolly + upward shift for centered cards.
-      const modalNeed = 8.5;
+      // Upward stack (top ~5.67) needs a bit more room than the old
+      // down-exploding layout, so 9.5 instead of 8.5.
+      const modalNeed = 9.5;
       fr.boostTarget = Math.max(0, Math.min(MAX_RADIUS - preOpenBase, modalNeed - preOpenBase));
       fr.shiftYTarget = -0.7;
       prevFramingOpenRef.current = true;
@@ -643,10 +651,12 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     const fFree = fBottom - tEff;
     const fFit = Math.max(0.2, Math.min(1, fFree));
 
-    // Full-burger fit in the free strip (exploded worst case):
-    // height 2.6..-1.8 = 4.4 + 0.6 margin = 5.0 (+8% lens margin),
-    // width pedestal 5.6 + fries overhang ~0.5 = ~6.1 (+8%).
-    const H_OBJ = 5.0 * 1.08;
+    // Full-burger fit in the free strip (upward-only exploded worst case):
+    // slate base y -0.15 to bun-top 4.8 + dome ~0.87 = top ~5.67, total
+    // height ~5.9 + 8% lens margin => H_OBJ ~6.37. Width pedestal 5.6 +
+    // fries overhang ~0.5 = ~6.1 (+8%). Stack sits ABOVE the pedestal, so
+    // the same combined-shift centering keeps it inside the free strip.
+    const H_OBJ = 5.9 * 1.08;
     const W_OBJ = 6.1 * 1.08;
     const needH = H_OBJ / (FIT_PER_D * fFit);
     const needW = aspect > 0 ? W_OBJ / (FIT_PER_D * aspect) : needH;
@@ -671,8 +681,8 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   const clampRadius = (v: number) => Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, v));
 
   // Returns true when the pointer lands on the burger / an ingredient mesh.
-  // Background / empty space returns false. Used on pointerdown to decide
-  // whether a subsequent single-pointer drag may rotate.
+  // Background / empty space returns false. Used for hover cursor + tap
+  // raycast only — single-drag rotate works ANYWHERE (burger or background).
   const hitTestsBurger = (clientX: number, clientY: number): boolean => {
     if (!containerRef.current || !cameraRef.current || !dishGroupRef.current) return false;
     const rect = containerRef.current.getBoundingClientRect();
@@ -714,9 +724,13 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   }, [sheetOpen, modalOpen]);
 
   // Unified Pointer Events gesture state machine:
-  // - 1 pointer starting on burger -> drag rotates; starting on background -> no-op
-  // - 2 pointers -> pinch zooms (smooth, clamped, no jump on 2nd finger landing)
-  // - tap (short + small move + no pinch) -> raycast select (never zooms)
+  // - 1 pointer drag ANYWHERE (burger or background) -> rotates ONLY
+  //   theta/phi, never radius
+  // - 2 pointers -> pinch zooms ONLY radius, never theta/phi (smooth,
+  //   clamped, no jump on 2nd finger landing)
+  // - wheel anywhere -> zooms ONLY radius
+  // - tap (short + small move + no pinch) -> raycast select burger /
+  //   deselect background (never zooms, never rotates)
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     // Let overlay buttons (spatial pins, AR anchor) handle their own press:
     // a pointer starting on a <button> must not start rotate/pinch/tap.
@@ -729,10 +743,11 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     }
 
     if (activePointersRef.current.size === 1) {
-      // Fresh single-pointer gesture: hit-test once at touchdown.
+      // Fresh single-pointer gesture: rotates anywhere (burger or black
+      // background). Tap raycast still decides select/deselect on release.
       dragStartRef.current = { x: e.clientX, y: e.clientY, time: Date.now() };
       lastSinglePosRef.current = { x: e.clientX, y: e.clientY };
-      dragStartedOnBurgerRef.current = hitTestsBurger(e.clientX, e.clientY);
+      dragStartedOnBurgerRef.current = true;
       isInteractingRef.current = true;
       didPinchRef.current = false;
       pinchPrevDistRef.current = null;
@@ -777,14 +792,18 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
       return;
     }
 
-    // Single-pointer drag: rotate ONLY if the gesture started on the burger.
-    // Background drags are an intentional no-op (no rotate, no zoom).
+    // Single-pointer drag: rotate ONLY theta/phi, NEVER radius.
+    // Works anywhere on canvas (burger OR background). Zoom is pinch/wheel
+    // only — no cross-talk by construction (this branch never touches radius,
+    // pinch/wheel branches never touch theta/phi).
     if (!isInteractingRef.current || !lastSinglePosRef.current) return;
     const last = lastSinglePosRef.current;
     const dx = e.clientX - last.x;
     const dy = e.clientY - last.y;
     lastSinglePosRef.current = { x: e.clientX, y: e.clientY };
 
+    // Parked after a pinch (one finger still down) stays non-rotating until
+    // a fresh pointerdown — prevents a sudden rotation jump.
     if (!dragStartedOnBurgerRef.current) return;
 
     sphericalRef.current.theta -= dx * ROT_SPEED;
@@ -1002,7 +1021,7 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
 
       {/* Quick Camera Hint helper */}
       <div className="absolute bottom-[calc(1rem+env(safe-area-inset-bottom))] left-4 z-20 pointer-events-none hidden sm:flex items-center gap-2 bg-stone-900/70 backdrop-blur-sm border border-white/10 px-3 py-1.5 rounded-lg text-[11px] text-stone-400">
-        <span>Arrastra la hamburguesa para rotar 360°</span>
+        <span>Arrastra para rotar 360°</span>
         <span>•</span>
         <span>Rueda o pellizca para zoom</span>
         <span>•</span>

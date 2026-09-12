@@ -39,7 +39,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'El brillo característico se logra glaseando con emulsión tibia de yema campera antes del último minuto de cocción.',
         icon: '🍞',
         colorHex: '#d9822b',
-        explodedPosition: [0, 2.6, 0],
+        explodedPosition: [0, 4.8, 0],
         assembledPosition: [0, 0.95, 0],
         layerOrder: 1,
         isCustomizable: false
@@ -61,7 +61,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'Se aplica a temperatura ambiente para no coagular la emulsión con el calor residual del pan.',
         icon: '🥄',
         colorHex: '#e2d3b3',
-        explodedPosition: [0, 2.0, 0],
+        explodedPosition: [0, 4.1, 0],
         assembledPosition: [0, 0.78, 0],
         layerOrder: 2,
         isCustomizable: true
@@ -83,7 +83,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'Corta la grasa del Wagyu y reinicia el paladar en cada bocado.',
         icon: '🥒',
         colorHex: '#527929',
-        explodedPosition: [0, 1.5, 0],
+        explodedPosition: [0, 3.5, 0],
         assembledPosition: [0, 0.68, 0],
         layerOrder: 3,
         isCustomizable: true
@@ -103,7 +103,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'Despojado de semillas sobrantes para no humedecer la base del pan.',
         icon: '🍅',
         colorHex: '#c73328',
-        explodedPosition: [0, 1.05, 0],
+        explodedPosition: [0, 3.0, 0],
         assembledPosition: [0, 0.58, 0],
         layerOrder: 4,
         isCustomizable: true
@@ -123,7 +123,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'Funciona como barrera térmica arquitectónica entre la carne caliente y el pan.',
         icon: '🥬',
         colorHex: '#46a344',
-        explodedPosition: [0, 0.65, 0],
+        explodedPosition: [0, 2.5, 0],
         assembledPosition: [0, 0.48, 0],
         layerOrder: 5,
         isCustomizable: true
@@ -145,7 +145,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'La campana de vapor logra que el queso abrace los bordes dentados del smash sin perder brillo graso.',
         icon: '🧀',
         colorHex: '#e9a124',
-        explodedPosition: [0, 0.25, 0],
+        explodedPosition: [0, 2.0, 0],
         assembledPosition: [0, 0.38, 0],
         layerOrder: 6,
         isCustomizable: true
@@ -165,7 +165,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'Sazonado únicamente en el instante del smash con sal marina ahumada en madera de roble.',
         icon: '🥩',
         colorHex: '#613222',
-        explodedPosition: [0, -0.2, 0],
+        explodedPosition: [0, 1.5, 0],
         assembledPosition: [0, 0.22, 0],
         layerOrder: 7,
         isCustomizable: false
@@ -187,7 +187,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'Aporta un contrapunto meloso que empareja con la grasa noble del corte vacuno.',
         icon: '🧅',
         colorHex: '#743c2b',
-        explodedPosition: [0, -0.65, 0],
+        explodedPosition: [0, 1.0, 0],
         assembledPosition: [0, 0.12, 0],
         layerOrder: 8,
         isCustomizable: true
@@ -210,7 +210,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'El tostado a alta temperatura crea un sello crujiente que evita el reblandecimiento.',
         icon: '🍞',
         colorHex: '#c27322',
-        explodedPosition: [0, -1.15, 0],
+        explodedPosition: [0, 0.5, 0],
         assembledPosition: [0, 0.02, 0],
         layerOrder: 9,
         isCustomizable: false
@@ -230,7 +230,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'La sal en escamas Maldon se agrega en los 3 segundos posteriores al escurrido para fundirse ligeramente.',
         icon: '🍟',
         colorHex: '#d89b34',
-        explodedPosition: [2.2, -0.3, 0.5],
+        explodedPosition: [2.2, 0.6, 0.5],
         assembledPosition: [1.35, 0.0, 0.35],
         layerOrder: 10,
         isCustomizable: true
@@ -250,7 +250,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'Estructura la base para proyectar las sombras y mantener el equilibrio visual del plato.',
         icon: '🍽️',
         colorHex: '#252932',
-        explodedPosition: [0, -1.8, 0],
+        explodedPosition: [0, -0.15, 0],
         assembledPosition: [0, -0.15, 0],
         layerOrder: 11,
         isCustomizable: false
@@ -294,7 +294,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'El punto de cocción preserva intacta la capa de albúmina y la jugosidad marina.',
         icon: '🍣',
         colorHex: '#e76f51',
-        explodedPosition: [0, 1.8, 0],
+        explodedPosition: [0, 2.5, 0],
         assembledPosition: [0, 0.45, 0],
         layerOrder: 1,
         isCustomizable: false
@@ -316,7 +316,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'La acidez de la lima evita la oxidación y equilibra la grasa noble del salmón.',
         icon: '🥑',
         colorHex: '#7cb518',
-        explodedPosition: [0.8, 1.2, 0.3],
+        explodedPosition: [0.8, 1.7, 0.3],
         assembledPosition: [0.4, 0.35, 0.2],
         layerOrder: 2,
         isCustomizable: true
@@ -358,7 +358,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'Servido tibio a 36°C para generar contraste con el pescado templado.',
         icon: '🍚',
         colorHex: '#f8f9fa',
-        explodedPosition: [0, -0.3, 0],
+        explodedPosition: [0, 0.5, 0],
         assembledPosition: [0, 0.1, 0],
         layerOrder: 4,
         isCustomizable: false
@@ -378,7 +378,7 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'Mantiene la temperatura ideal de cada cuadrante del plato.',
         icon: '🥣',
         colorHex: '#1e2025',
-        explodedPosition: [0, -1.5, 0],
+        explodedPosition: [0, -0.1, 0],
         assembledPosition: [0, -0.1, 0],
         layerOrder: 5,
         isCustomizable: false
