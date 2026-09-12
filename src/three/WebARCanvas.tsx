@@ -17,6 +17,8 @@ interface WebARCanvasProps {
   sheetOpen?: boolean;
   /** True while a centered modal (story / order) is open. */
   modalOpen?: boolean;
+  /** Manual vertical pan offset (lookAt Y, world units, clamped -2..+2). Additive with auto shift. */
+  panYOffset?: number;
   /** Fraction of canvas height still visible for 3D (0..1). 0.58 = 42dvh peek, 0.30 = 70dvh expanded, 1.0 = closed. */
   visibleHeightFraction?: number;
   /** True while the top layers card (ExplodedControls expanded panel) occludes the canvas top on mobile. */
@@ -49,6 +51,7 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   visibleHeightFraction = 1.0,
   topPanelOpen = false,
   topHeightFraction = 0,
+  panYOffset = 0,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -73,25 +76,27 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   // - overlay <button>s capture their own press (guarded, never rotate/zoom)
   // - rotate never zooms, zoom never rotates; select/explode ticks never
   //   touch radius (radius owned by init + user pinch/wheel + additive boost)
-  // Zoom range: min 2.2 keeps close-up detail; max 18.0 frames the full
+  // Zoom range: min 2.2 keeps close-up detail; max 20.0 frames the full
   // upward-only exploded stack (slate base y -0.15, layers 0.5..4.8, bun-top
   // dome top ~5.67, fries x 2.2) plus pedestal with margin on 360px
-  // portrait (vertical fit ~13.82 at max, visible ~8.0 in the 58% peek free
-  // strip; horizontal ~6.9 at aspect 0.5) and desktop. Verified: at 18.0,
-  // H_fit=13.82 covers the ~5.9 stack +8% margin (~6.37) in the top 58%
-  // (needs ~14.3 incl. width worst-case) and W_fit~6.9 covers the ~5.65
-  // wide pedestal+fries with margin; top-only+toast 46% free needs ~18.05
-  // = MAX best-effort (~0% crop).
+  // portrait (vertical fit ~15.35 at max, visible ~8.9 in the 58% peek free
+  // strip and ~7.06 in the 46% top-only+toast strip; horizontal ~7.68 at
+  // aspect 0.5) and desktop. Verified: at 20.0, H_fit=15.35 covers the
+  // ~5.9 stack +8% margin (~6.37) in the top 58% (needs ~14.31) and in the
+  // 46% top-only+toast strip (needs ~18.05), and W_fit~7.68 covers the
+  // ~5.65 wide pedestal+fries with margin; over-constrained (expanded
+  // sheet + expanded top, free 0.2) still dollies to MAX best-effort.
   const MIN_RADIUS = 2.2;
-  const MAX_RADIUS = 18.0;
+  const MAX_RADIUS = 20.0;
   const MIN_PHI = 0.2;
   const MAX_PHI = Math.PI / 2 - 0.05;
   const ROT_SPEED = 0.0065;
-  // Scaled proportionally to the wider 2.2-18.0 range (width 15.8 vs 10.8
-  // for 2.2-13 => x1.46): pinch 0.018->0.026, wheel 0.0045->0.0065 so
-  // traversing the full range takes a similar gesture distance as before.
-  const PINCH_FACTOR = 0.026;
-  const WHEEL_FACTOR = 0.0065;
+  // Scaled +~27% from the 18.0-range tuning for a snappier feel across the
+  // wider 2.2-20.0 range (width 17.8): pinch 0.026->0.033, wheel
+  // 0.0065->0.0083 so traversing the full range takes a similar gesture
+  // distance as before but with noticeably higher sensitivity.
+  const PINCH_FACTOR = 0.033;
+  const WHEEL_FACTOR = 0.0083;
   const TAP_MAX_MS = 300;
   const TAP_MAX_PX = 8;
 
@@ -123,6 +128,10 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     userTouchedSinceAuto: false,
   });
   const prevFramingOpenRef = useRef(false);
+  // Manual pan offset ref so the animate loop (mounted per dish.id) always
+  // sees the latest slider value without re-creating the scene.
+  const panYOffsetRef = useRef(0);
+  panYOffsetRef.current = panYOffset || 0;
 
   // 2D Projected spatial pins
   const [projectedPins, setProjectedPins] = useState<ProjectedPin[]>([]);
@@ -375,7 +384,8 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
       // Smooth camera interpolation towards spherical target
       const s = sphericalRef.current;
       const effectiveRadius = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, s.radius + fr.boost));
-      const effectiveLookAtY = targetCamLookAtRef.current.y + fr.shiftY;
+      const clampedPan = Math.max(-2.0, Math.min(2.0, panYOffsetRef.current || 0));
+      const effectiveLookAtY = targetCamLookAtRef.current.y + fr.shiftY + clampedPan;
       const effectiveLookAtX = targetCamLookAtRef.current.x;
       const effectiveLookAtZ = targetCamLookAtRef.current.z;
       const targetX = effectiveLookAtX + effectiveRadius * Math.sin(s.phi) * Math.sin(s.theta);
@@ -583,15 +593,22 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     sphericalRef.current.radius = isARMode ? 4.6 : 5.2;
   }, [dish.id, isARMode, sheetOpen, modalOpen, selectedIngredientId]);
 
-  // Sheet/modal/top auto-framing: bottom sheets shift lookAt down (burger
-  // up on screen); top layers card + toast shift lookAt up (burger down into
-  // the lower free space); both open centers the burger in the middle free
-  // strip. Auto dolly-out keeps the full burger fitting the free height.
-  // Additive boost => user pinch after auto-frame always wins (we never
-  // overwrite sphericalRef.radius). Restore on close = lerp boost/shift to 0.
+  // Sheet/modal/top/explosion auto-framing: bottom sheets shift lookAt
+  // down (burger up on screen); top layers card + toast shift lookAt up
+  // (burger down into the lower free space); both open centers the burger
+  // in the middle free strip. Explosion progress auto-fits the CURRENT
+  // stack height every change (toggle or slider 0..1, mid-animation
+  // included since the tween ticks progress each frame): assembled ~1.5
+  // -> exploded upward stack ~5.9, +8% margin. Auto dolly-out keeps the
+  // current height fitting the free strip. Additive boost => user pinch
+  // after auto-frame always wins (we never overwrite sphericalRef.radius).
+  // Restore on close/reassemble = lerp boost/shift to 0. Resize /
+  // orientation handlers never touch radius/boost (no zoom jumps).
   useEffect(() => {
     const hasTop = Boolean(topPanelOpen && (topHeightFraction || 0) > 0.01);
-    const framingOpen = Boolean(sheetOpen || modalOpen || hasTop);
+    const p = Math.max(0, Math.min(1, explosionProgress || 0));
+    const explosionActive = p > 0.02;
+    const framingOpen = Boolean(sheetOpen || modalOpen || hasTop || explosionActive);
     const wasOpen = prevFramingOpenRef.current;
     const fr = framingRef.current;
 
@@ -617,6 +634,11 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     const FOV_TAN = Math.tan(THREE.MathUtils.degToRad(42 / 2)); // 42° vertical FOV
     const FIT_PER_D = 2 * FOV_TAN; // world units of vertical fit per unit distance (~0.7677)
 
+    // Current stack height follows explosion progress mid-animation:
+    // assembled ~1.5 -> exploded upward stack ~5.9 (+8% lens margin).
+    const H_CURR = (1.5 + (5.9 - 1.5) * p) * 1.08;
+    const W_OBJ = 6.1 * 1.08;
+
     // Sheet fraction: 0.58 peek (42dvh), 0.30 expanded (70dvh). Desktop side
     // cards barely cover height, so dampen the height loss on wide screens.
     const rawSheetF = Math.max(0.2, Math.min(1, visibleHeightFraction || 1));
@@ -636,9 +658,9 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
 
     if (modalOpen && !sheetOpen && tEff === 0) {
       // Modest context dolly + upward shift for centered cards.
-      // Upward stack (top ~5.67) needs a bit more room than the old
-      // down-exploding layout, so 9.5 instead of 8.5.
-      const modalNeed = 9.5;
+      // Progress-aware: assembled needs no dolly (base already frames
+      // ~1.5), exploded upward stack needs ~9.5. Mid-animation lerps.
+      const modalNeed = preOpenBase + (9.5 - preOpenBase) * p;
       fr.boostTarget = Math.max(0, Math.min(MAX_RADIUS - preOpenBase, modalNeed - preOpenBase));
       fr.shiftYTarget = -0.7;
       prevFramingOpenRef.current = true;
@@ -652,14 +674,13 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     const fFree = fBottom - tEff;
     const fFit = Math.max(0.2, Math.min(1, fFree));
 
-    // Full-burger fit in the free strip (upward-only exploded worst case):
-    // slate base y -0.15 to bun-top 4.8 + dome ~0.87 = top ~5.67, total
-    // height ~5.9 + 8% lens margin => H_OBJ ~6.37. Width pedestal 5.6 +
-    // fries overhang ~0.5 = ~6.1 (+8%). Stack sits ABOVE the pedestal, so
-    // the same combined-shift centering keeps it inside the free strip.
-    const H_OBJ = 5.9 * 1.08;
-    const W_OBJ = 6.1 * 1.08;
-    const needH = H_OBJ / (FIT_PER_D * fFit);
+    // Full-burger fit in the free strip for the CURRENT height H_CURR:
+    // slate base y -0.15 to bun-top 4.8 + dome ~0.87 = top ~5.67 when
+    // exploded (total ~5.9); assembled total ~1.5. Width pedestal 5.6 +
+    // fries overhang ~0.5 = ~6.1 (+8%) kept as a max() safety. Stack sits
+    // ABOVE the pedestal, so the same combined-shift centering keeps it
+    // inside the free strip.
+    const needH = H_CURR / (FIT_PER_D * fFit);
     const needW = aspect > 0 ? W_OBJ / (FIT_PER_D * aspect) : needH;
     const required = Math.max(needH, needW);
     const clampedRequired = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, required));
@@ -676,7 +697,7 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     fr.shiftYTarget = Math.max(-2.0, Math.min(2.0, combinedOffset));
 
     prevFramingOpenRef.current = true;
-  }, [sheetOpen, modalOpen, visibleHeightFraction, topPanelOpen, topHeightFraction, dish.id]);
+  }, [sheetOpen, modalOpen, visibleHeightFraction, topPanelOpen, topHeightFraction, explosionProgress, dish.id]);
 
   // ---- Gesture helpers (hit-test + clamp) ----
   const clampRadius = (v: number) => Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, v));

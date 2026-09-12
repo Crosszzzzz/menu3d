@@ -143,3 +143,18 @@ body {
   outline-offset: 2px;
   border-radius: 9999px;
 }
+
+/* Vertical pan slider (right-center edge): thin hairline over canvas.
+   Wrapper owns the 44px touch target; control never triggers canvas
+   rotate/zoom (touch-action none, pointer capture + stopPropagation in JS)
+   and never participates in page pan (pan-y nowhere). */
+#vertical-pan-slider,
+#vertical-pan-slider .vertical-pan-track {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#vertical-pan-slider .vertical-pan-track:focus-visible {
+  outline: 2px solid #f59e0b;
+  outline-offset: 2px;
+}

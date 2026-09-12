@@ -4,6 +4,7 @@ import { Dish, Ingredient } from './types/dish';
 import { WebARCanvas } from './three/WebARCanvas';
 import { IngredientModal } from './components/IngredientModal';
 import { ExplodedControls } from './components/ExplodedControls';
+import { VerticalPanSlider } from './components/VerticalPanSlider';
 import { DishHeader } from './components/DishHeader';
 import { DishStoryModal } from './components/DishStoryModal';
 import { OrderModal } from './components/OrderModal';
@@ -29,6 +30,9 @@ export default function App() {
   // Top layers card open state (mobile portrait). Reported by ExplodedControls:
   // true = expanded panel visible (~40-50% viewport height), false = collapsed pill.
   const [isTopPanelOpen, setIsTopPanelOpen] = useState<boolean>(true);
+  // Manual vertical pan (lookAt Y offset, -2..+2, default 0). Additive with
+  // the canvas auto shift; slider stays visible while sheets are open.
+  const [panYOffset, setPanYOffset] = useState<number>(0);
 
   // Animation frame ref for smooth explosion tweening
   const animFrameRef = useRef<number | null>(null);
@@ -89,6 +93,7 @@ export default function App() {
     setExcludedIngredientIds([]);
     setSheetVisibleOverride(null);
     setTopHeightOverride(null);
+    setPanYOffset(0);
   };
 
   const handleToggleExclude = (ingredientId: string) => {
@@ -136,6 +141,7 @@ export default function App() {
               ? (topHeightOverride ?? (0.42 + (showHelpToast && selectedIngredient === null ? 0.12 : 0)))
               : 0
           }
+          panYOffset={panYOffset}
         />
 
         {/* Top Header & Mode Bar (compact on mobile while sheet is open) */}
@@ -166,6 +172,12 @@ export default function App() {
           onTopPanelOpenChange={setIsTopPanelOpen}
           onTopHeightChange={setTopHeightOverride}
         />
+
+        {/* Desplazamiento vertical manual: visible siempre salvo modales a
+            pantalla completa; se mantiene con fichas abiertas (ahí más falta). */}
+        {!(isStoryModalOpen || isOrderModalOpen) && (
+          <VerticalPanSlider value={panYOffset} onChange={setPanYOffset} />
+        )}
 
         {/* Ingredient Detail Modal (UI Overlay when selected) */}
         <IngredientModal
