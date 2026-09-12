@@ -94,10 +94,10 @@ export default function App() {
   return (
     <main
       id="webar-gastronomy-app"
-      className="relative w-screen h-screen overflow-hidden bg-[#0c0e12] font-sans text-stone-100 flex flex-col"
+      className="relative w-screen h-screen supports-[height:100dvh]:h-[100dvh] overflow-hidden bg-[#0c0e12] font-sans text-stone-100 flex flex-col"
     >
       {/* 3D Gastronomic Viewport / WebAR Camera Passthrough */}
-      <div className="relative flex-1 w-full h-full">
+      <div className="relative flex-1 w-full h-full min-h-0">
         <WebARCanvas
           dish={currentDish}
           explosionProgress={explosionProgress}
@@ -131,6 +131,7 @@ export default function App() {
           onSelectIngredient={handleSelectIngredient}
           show3DPins={show3DPins}
           onToggle3DPins={() => setShow3DPins(!show3DPins)}
+          hasTopBanner={showHelpToast}
         />
 
         {/* Ingredient Detail Modal (UI Overlay when selected) */}
@@ -146,11 +147,11 @@ export default function App() {
 
         {/* Floating Quick Action: Reassemble pill if exploded & card closed */}
         {explosionProgress > 0.1 && !selectedIngredient && (
-          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-20 pointer-events-auto">
+          <div className="absolute inset-x-0 bottom-[calc(1rem+env(safe-area-inset-bottom))] z-20 pointer-events-none flex justify-center px-4">
             <button
               id="floating-reassemble-pill"
               onClick={handleReassemble}
-              className="flex items-center gap-2 px-5 py-2.5 bg-stone-900/90 hover:bg-stone-800 text-amber-300 font-bold text-xs rounded-full border border-amber-500/40 shadow-2xl backdrop-blur-md transition-all active:scale-95"
+              className="pointer-events-auto min-h-[44px] flex items-center gap-2 px-5 py-2.5 bg-stone-900/90 hover:bg-stone-800 text-amber-300 font-bold text-xs rounded-full border border-amber-500/40 shadow-2xl backdrop-blur-md transition-all active:scale-95"
             >
               <RotateCcw size={14} className="text-amber-400" />
               <span>Reensamblar Plato Completo</span>
@@ -160,7 +161,7 @@ export default function App() {
 
         {/* First-time interaction hint toast */}
         {showHelpToast && (
-          <div className="absolute top-20 right-4 z-20 pointer-events-auto max-w-xs bg-stone-900/95 border border-amber-500/30 rounded-2xl p-3.5 shadow-2xl backdrop-blur-xl animate-in fade-in duration-500">
+          <div className="absolute z-30 pointer-events-auto inset-x-2 top-[calc(env(safe-area-inset-top)+60px)] sm:inset-x-auto sm:right-4 sm:top-20 sm:max-w-xs bg-stone-900/95 border border-amber-500/30 rounded-2xl p-3.5 shadow-2xl backdrop-blur-xl animate-in fade-in duration-500">
             <div className="flex items-start justify-between gap-2 mb-1">
               <div className="flex items-center gap-1.5 text-xs font-bold text-amber-300">
                 <Layers size={14} />
@@ -169,7 +170,8 @@ export default function App() {
               <button
                 id="dismiss-help-toast"
                 onClick={() => setShowHelpToast(false)}
-                className="text-stone-400 hover:text-stone-200 text-xs"
+                aria-label="Cerrar ayuda"
+                className="min-h-[44px] min-w-[44px] -m-2 p-2 flex items-center justify-center text-stone-400 hover:text-stone-200 text-xs"
               >
                 ✕
               </button>

@@ -12,6 +12,8 @@ interface ExplodedControlsProps {
   onSelectIngredient: (ingredient: Ingredient) => void;
   show3DPins: boolean;
   onToggle3DPins: () => void;
+  /** True while the help toast banner is visible; pushes the panel down on mobile so slots never overlap. */
+  hasTopBanner?: boolean;
 }
 
 export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
@@ -24,6 +26,7 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
   onSelectIngredient,
   show3DPins,
   onToggle3DPins,
+  hasTopBanner = false,
 }) => {
   const isExploded = explosionProgress > 0.05;
   const percentage = Math.round(explosionProgress * 100);
@@ -31,15 +34,19 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
   return (
     <div
       id="exploded-view-controls-panel"
-      className="absolute top-20 left-4 z-20 max-w-xs sm:max-w-sm flex flex-col gap-2 pointer-events-none"
+      className={`absolute z-20 left-2 right-2 sm:left-4 sm:right-auto sm:max-w-sm flex flex-col gap-2 pointer-events-none ${
+        hasTopBanner
+          ? 'top-[calc(env(safe-area-inset-top)+188px)] sm:top-20'
+          : 'top-[calc(env(safe-area-inset-top)+64px)] sm:top-20'
+      }`}
     >
       {/* Primary Floating Action: Explode ↔ Reassemble Toggle */}
-      <div className="pointer-events-auto bg-stone-900/90 backdrop-blur-xl border border-stone-700/60 rounded-2xl p-3 shadow-2xl flex flex-col gap-2.5">
+      <div className="pointer-events-auto overlay-panel bg-stone-900/90 backdrop-blur-xl border border-stone-700/60 rounded-2xl p-3 shadow-2xl flex flex-col gap-2.5 w-full sm:w-[320px] max-h-[calc(100dvh-220px)] sm:max-h-none overflow-y-auto custom-scrollbar">
         <div className="flex items-center justify-between gap-2">
           <button
             id="toggle-exploded-state-button"
             onClick={isExploded ? onReassemble : onExplodeFull}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-bold text-xs transition-all shadow-md active:scale-95 ${
+            className={`min-h-[44px] flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-bold text-xs transition-all shadow-md active:scale-95 ${
               isExploded
                 ? 'bg-amber-500 hover:bg-amber-400 text-stone-950 shadow-amber-500/20'
                 : 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-stone-950 shadow-amber-500/25'
@@ -62,19 +69,20 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
           <button
             id="toggle-3d-pins-button"
             onClick={onToggle3DPins}
-            className={`p-2.5 rounded-xl border text-xs font-medium transition-colors flex items-center gap-1.5 ${
+            className={`min-h-[44px] min-w-[44px] p-2.5 rounded-xl border text-xs font-medium transition-colors flex items-center justify-center gap-1.5 ${
               show3DPins
                 ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
                 : 'bg-stone-800/80 hover:bg-stone-700 border-stone-700 text-stone-400'
             }`}
             title={show3DPins ? 'Ocultar etiquetas 3D' : 'Mostrar etiquetas 3D'}
+            aria-pressed={show3DPins}
           >
             <Tag size={15} />
             <span className="hidden sm:inline text-[11px]">Pins</span>
           </button>
         </div>
 
-        {/* Precision Expansion Slider */}
+        {/* Precision Expansion Slider (44px hit area) */}
         <div className="pt-1">
           <div className="flex items-center justify-between text-[11px] font-medium text-stone-300 mb-1.5">
             <div className="flex items-center gap-1.5 text-amber-400">
@@ -86,7 +94,7 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
             </span>
           </div>
 
-          <div className="relative flex items-center">
+          <div className="relative flex items-center min-h-[44px]">
             <input
               id="explosion-progress-slider"
               type="range"
@@ -95,7 +103,8 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
               step="0.01"
               value={explosionProgress}
               onChange={(e) => onExplosionChange(parseFloat(e.target.value))}
-              className="w-full h-1.5 bg-stone-700 rounded-lg appearance-none cursor-pointer accent-amber-500 focus:outline-none"
+              aria-label="Separación de capas"
+              className="explosion-slider w-full cursor-pointer accent-amber-500 focus:outline-none"
             />
           </div>
 
@@ -107,11 +116,14 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
 
         {/* Quick Horizontal Layer Selector Pills */}
         <div className="pt-1.5 border-t border-stone-800/80">
-          <div className="flex items-center gap-1 text-[10px] text-stone-400 mb-1.5">
-            <Layers size={11} className="text-amber-400" />
-            <span>Capas del Plato:</span>
+          <div className="flex items-center justify-between gap-1 text-[10px] text-stone-400 mb-1.5">
+            <div className="flex items-center gap-1">
+              <Layers size={11} className="text-amber-400" />
+              <span>Capas del Plato:</span>
+            </div>
+            <span className="sm:hidden text-stone-500 font-semibold">Desliza →</span>
           </div>
-          <div className="flex gap-1.5 overflow-x-auto pb-1 no-scrollbar">
+          <div className="chip-row-fade flex gap-1.5 overflow-x-auto pb-1 pr-6 no-scrollbar snap-x">
             {dish.ingredients
               .filter((ing) => ing.category !== 'decoracion')
               .map((ing) => {
@@ -121,7 +133,7 @@ export const ExplodedControls: React.FC<ExplodedControlsProps> = ({
                     key={ing.id}
                     id={`layer-chip-${ing.id}`}
                     onClick={() => onSelectIngredient(ing)}
-                    className={`whitespace-nowrap flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg border transition-all ${
+                    className={`snap-start shrink-0 min-h-[44px] whitespace-nowrap flex items-center gap-1 text-[11px] px-3 py-2 rounded-lg border transition-all ${
                       isSelected
                         ? 'bg-amber-500 text-stone-950 font-bold border-amber-300'
                         : 'bg-stone-800/70 hover:bg-stone-700/80 text-stone-300 border-stone-700/50'

@@ -46,35 +46,43 @@ export const IngredientModal: React.FC<IngredientModalProps> = ({
   return (
     <div
       id="ingredient-detail-overlay"
-      className="absolute bottom-0 inset-x-0 sm:bottom-6 sm:right-6 sm:left-auto sm:max-w-md z-30 transition-all transform animate-in slide-in-from-bottom duration-300 pointer-events-auto"
+      className="absolute z-30 inset-x-2 bottom-[calc(0.5rem+env(safe-area-inset-bottom))] sm:inset-x-auto sm:bottom-6 sm:right-6 sm:left-auto sm:w-full sm:max-w-md transition-all transform animate-in slide-in-from-bottom duration-300 pointer-events-auto"
     >
-      <div className="bg-stone-900/95 sm:rounded-3xl rounded-t-3xl border border-stone-700/60 shadow-2xl backdrop-blur-xl p-5 sm:p-6 text-stone-100 max-h-[85vh] overflow-y-auto custom-scrollbar border-t-amber-500/30">
-        
-        {/* Header bar: Layer badge & close button */}
-        <div className="flex items-center justify-between pb-3 border-b border-stone-800">
-          <div className="flex items-center gap-2">
-            <span className="text-xl p-2 rounded-2xl bg-amber-500/15 border border-amber-500/30 text-amber-300">
-              {ingredient.icon}
-            </span>
-            <div>
-              <span className="text-[10px] font-semibold tracking-wider uppercase px-2 py-0.5 rounded-full bg-stone-800 text-amber-400 border border-amber-500/20">
-                {ingredient.categoryLabel}
-              </span>
-              <h3 className="text-lg font-bold text-white leading-tight mt-0.5">
-                {ingredient.name}
-              </h3>
-            </div>
-          </div>
-
-          <button
-            id="close-ingredient-card"
-            onClick={onClose}
-            className="p-1.5 rounded-full bg-stone-800/80 hover:bg-stone-700 text-stone-400 hover:text-white transition-colors"
-            title="Cerrar ficha"
-          >
-            <X size={18} />
-          </button>
+      <div className="bg-stone-900/95 rounded-3xl sm:rounded-3xl border border-stone-700/60 shadow-2xl backdrop-blur-xl text-stone-100 border-t-amber-500/30 flex flex-col overflow-hidden max-h-[58dvh] sm:max-h-[85vh]">
+        {/* Drag handle (mobile affordance) */}
+        <div className="pt-2 pb-1 flex justify-center shrink-0" aria-hidden="true">
+          <span className="w-10 h-1.5 rounded-full bg-stone-700" />
         </div>
+
+        {/* Scrollable content: text selectable, vertical pan allowed so the
+            locked page + touch-none canvas never trap sheet scrolling */}
+        <div className="overlay-panel overflow-y-auto custom-scrollbar select-text px-5 sm:px-6 pb-3 min-h-0">
+          {/* Header bar: Layer badge & close button */}
+          <div className="flex items-center justify-between pb-3 border-b border-stone-800">
+            <div className="flex items-center gap-2">
+              <span className="text-xl p-2 rounded-2xl bg-amber-500/15 border border-amber-500/30 text-amber-300">
+                {ingredient.icon}
+              </span>
+              <div>
+                <span className="text-[10px] font-semibold tracking-wider uppercase px-2 py-0.5 rounded-full bg-stone-800 text-amber-400 border border-amber-500/20">
+                  {ingredient.categoryLabel}
+                </span>
+                <h3 className="text-lg font-bold text-white leading-tight mt-0.5">
+                  {ingredient.name}
+                </h3>
+              </div>
+            </div>
+
+            <button
+              id="close-ingredient-card"
+              onClick={onClose}
+              className="min-h-[44px] min-w-[44px] p-2 rounded-full bg-stone-800/80 hover:bg-stone-700 text-stone-400 hover:text-white transition-colors flex items-center justify-center"
+              title="Cerrar ficha"
+              aria-label="Cerrar ficha"
+            >
+              <X size={18} />
+            </button>
+          </div>
 
         {/* Quick Highlights Bar: Gramaje, Calorías, Capa */}
         <div className="grid grid-cols-3 gap-2 my-3.5">
@@ -192,7 +200,7 @@ export const IngredientModal: React.FC<IngredientModalProps> = ({
             <button
               id={`toggle-exclude-${ingredient.id}`}
               onClick={() => onToggleExclude(ingredient.id)}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${
+              className={`min-h-[44px] px-3 py-2 text-xs font-semibold rounded-lg transition-colors ${
                 isExcluded
                   ? 'bg-amber-500 text-stone-950 hover:bg-amber-400'
                   : 'bg-stone-700 hover:bg-stone-600 text-stone-200'
@@ -203,25 +211,26 @@ export const IngredientModal: React.FC<IngredientModalProps> = ({
           </div>
         )}
 
-        {/* Footer controls: Step layers & Reensamblar button */}
-        <div className="pt-2 border-t border-stone-800 flex items-center justify-between gap-2">
+        {/* Footer controls: Step layers & Reensamblar button (pinned, safe-area padded) */}
+        </div>
+        <div className="shrink-0 px-5 sm:px-6 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] border-t border-stone-800 flex items-center justify-between gap-2 bg-stone-900/95">
           <div className="flex items-center gap-1.5">
             <button
               id="prev-layer-button"
               onClick={handlePrev}
-              className="p-2 rounded-xl bg-stone-800 hover:bg-stone-700 text-stone-300 transition-colors flex items-center gap-1 text-xs"
+              className="min-h-[44px] min-w-[44px] p-2 rounded-xl bg-stone-800 hover:bg-stone-700 text-stone-300 transition-colors flex items-center justify-center gap-1 text-xs"
               title="Capa anterior"
+              aria-label="Capa anterior"
             >
               <ChevronLeft size={16} />
-              <span className="hidden xs:inline">Anterior</span>
             </button>
             <button
               id="next-layer-button"
               onClick={handleNext}
-              className="p-2 rounded-xl bg-stone-800 hover:bg-stone-700 text-stone-300 transition-colors flex items-center gap-1 text-xs"
+              className="min-h-[44px] min-w-[44px] p-2 rounded-xl bg-stone-800 hover:bg-stone-700 text-stone-300 transition-colors flex items-center justify-center gap-1 text-xs"
               title="Capa siguiente"
+              aria-label="Capa siguiente"
             >
-              <span className="hidden xs:inline">Siguiente</span>
               <ChevronRight size={16} />
             </button>
           </div>
@@ -229,7 +238,7 @@ export const IngredientModal: React.FC<IngredientModalProps> = ({
           <button
             id="reassemble-from-card-button"
             onClick={onReassemble}
-            className="px-4 py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-stone-950 font-bold text-xs rounded-xl shadow-md transition-all active:scale-95 flex items-center gap-1.5"
+            className="min-h-[44px] px-4 py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-stone-950 font-bold text-xs rounded-xl shadow-md transition-all active:scale-95 flex items-center gap-1.5"
           >
             <span>Reensamblar Plato</span>
             <span>🍔</span>
