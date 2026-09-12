@@ -19,6 +19,8 @@ export default function App() {
   const [isStoryModalOpen, setIsStoryModalOpen] = useState<boolean>(false);
   const [isOrderModalOpen, setIsOrderModalOpen] = useState<boolean>(false);
   const [showHelpToast, setShowHelpToast] = useState<boolean>(true);
+  // Sheet peek (false = 42dvh) vs expanded (true = 70dvh) for canvas framing.
+  const [isSheetExpanded, setIsSheetExpanded] = useState<boolean>(false);
 
   // Animation frame ref for smooth explosion tweening
   const animFrameRef = useRef<number | null>(null);
@@ -62,6 +64,7 @@ export default function App() {
 
   const handleSelectIngredient = (ingredient: Ingredient | null) => {
     setSelectedIngredient(ingredient);
+    if (!ingredient) setIsSheetExpanded(false);
     // If not exploded yet and an ingredient is selected, gently separate layers to show context
     if (ingredient && explosionProgress < 0.4) {
       tweenExplosion(0.75, 600);
@@ -107,6 +110,11 @@ export default function App() {
           show3DPins={show3DPins}
           onToggleARMode={setIsARMode}
           excludedIngredientIds={excludedIngredientIds}
+          sheetOpen={selectedIngredient !== null}
+          modalOpen={isStoryModalOpen || isOrderModalOpen}
+          visibleHeightFraction={
+            selectedIngredient !== null ? (isSheetExpanded ? 0.3 : 0.58) : 1.0
+          }
         />
 
         {/* Top Header & Mode Bar (compact on mobile while sheet is open) */}
@@ -145,6 +153,7 @@ export default function App() {
           onReassemble={handleReassemble}
           isExcluded={selectedIngredient ? excludedIngredientIds.includes(selectedIngredient.id) : false}
           onToggleExclude={handleToggleExclude}
+          onExpandChange={setIsSheetExpanded}
         />
 
         {/* Floating Quick Action: Reassemble pill if exploded & card closed */}

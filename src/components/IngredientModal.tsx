@@ -10,6 +10,8 @@ interface IngredientModalProps {
   onReassemble: () => void;
   isExcluded: boolean;
   onToggleExclude: (id: string) => void;
+  /** Notifies parent when peek (false, 42dvh) <-> expanded (true, 70dvh) changes so the 3D canvas can re-frame. */
+  onExpandChange?: (expanded: boolean) => void;
 }
 
 export const IngredientModal: React.FC<IngredientModalProps> = ({
@@ -20,6 +22,7 @@ export const IngredientModal: React.FC<IngredientModalProps> = ({
   onReassemble,
   isExcluded,
   onToggleExclude,
+  onExpandChange,
 }) => {
   // Compact peek on mobile so the sheet + canvas coexist: collapsed ~42dvh
   // leaves the top ~30%+ of a 360-390px viewport visible for product context.
@@ -31,6 +34,11 @@ export const IngredientModal: React.FC<IngredientModalProps> = ({
   useEffect(() => {
     setIsExpanded(false);
   }, [ingredientId]);
+
+  // Report peek/expanded to parent for canvas auto-framing (42dvh vs 70dvh).
+  useEffect(() => {
+    onExpandChange?.(isExpanded);
+  }, [isExpanded, onExpandChange]);
 
   if (!ingredient) return null;
 

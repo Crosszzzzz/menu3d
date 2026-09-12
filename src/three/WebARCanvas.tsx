@@ -12,6 +12,12 @@ interface WebARCanvasProps {
   show3DPins: boolean;
   onToggleARMode: (enabled: boolean) => void;
   excludedIngredientIds?: string[];
+  /** True while the ingredient bottom-sheet is open (selected ingredient). */
+  sheetOpen?: boolean;
+  /** True while a centered modal (story / order) is open. */
+  modalOpen?: boolean;
+  /** Fraction of canvas height still visible for 3D (0..1). 0.58 = 42dvh peek, 0.30 = 70dvh expanded, 1.0 = closed. */
+  visibleHeightFraction?: number;
 }
 
 interface ProjectedPin {
@@ -33,6 +39,9 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   show3DPins,
   onToggleARMode,
   excludedIngredientIds = [],
+  sheetOpen = false,
+  modalOpen = false,
+  visibleHeightFraction = 1.0,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -54,18 +63,22 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   // - zoom: two-finger pinch or wheel only
   // - tap (<300ms, <8px, no pinch): raycast select/deselect
   // - background single-drag: no-op
-  // Zoom range: min 2.2 keeps close-up detail; max 13 frames the full
+  // Zoom range: min 2.2 keeps close-up detail; max 15.5 frames the full
   // exploded stack (y 2.6 to -1.8, fries x 2.2) plus pedestal with margin
-  // on 360px portrait (vertical fit ~10 units, horizontal ~4.9) and desktop.
+  // on 360px portrait (vertical fit ~11.9, visible ~6.9 at max; horizontal
+  // ~5.9) and desktop. Verified: at 15.5, H_fit=11.9 covers the 5.0 stack
+  // in the top 58% (needs ~12.1) and W_fit~5.95 covers the ~5.65 wide
+  // pedestal+fries with ~2% side crop worst-case — acceptable margin.
   const MIN_RADIUS = 2.2;
-  const MAX_RADIUS = 13;
+  const MAX_RADIUS = 15.5;
   const MIN_PHI = 0.2;
   const MAX_PHI = Math.PI / 2 - 0.05;
   const ROT_SPEED = 0.0065;
-  // Scaled ~1.5x vs the old 2.2-8.5 range so traversing the wider
-  // 2.2-13 range takes a similar gesture distance as before.
-  const PINCH_FACTOR = 0.018;
-  const WHEEL_FACTOR = 0.0045;
+  // Scaled proportionally to the wider 2.2-15.5 range (width 13.3 vs 10.8
+  // for 2.2-13 => x1.23): pinch 0.018->0.022, wheel 0.0045->0.0055 so
+  // traversing the full range takes a similar gesture distance as before.
+  const PINCH_FACTOR = 0.022;
+  const WHEEL_FACTOR = 0.0055;
   const TAP_MAX_MS = 300;
   const TAP_MAX_PX = 8;
 
@@ -80,8 +93,23 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   const targetCamLookAtRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0.4, 0));
   const currentCamLookAtRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0.4, 0));
 
-  // Spherical orbit values
+  // Spherical orbit values (BASE radius user-controlled; framing boost additive)
   const sphericalRef = useRef({ radius: 5.2, theta: 0.7, phi: 1.15 });
+
+  // Sheet/modal auto-framing (additive so user pinch always wins):
+  // - base radius/theta/phi in sphericalRef are NEVER touched by framing or resize.
+  // - boost (+shiftY) lerps to target on open/f-change, to 0 on close.
+  // - effectiveRadius = clamp(base + boost); effectiveLookAt = baseLookAt + shiftY.
+  // - userTouchedSinceAuto lets close restore logic respect manual pinch.
+  const framingRef = useRef({
+    boost: 0,
+    boostTarget: 0,
+    shiftY: 0,
+    shiftYTarget: 0,
+    preOpenBaseRadius: null as number | null,
+    userTouchedSinceAuto: false,
+  });
+  const prevFramingOpenRef = useRef(false);
 
   // 2D Projected spatial pins
   const [projectedPins, setProjectedPins] = useState<ProjectedPin[]>([]);
@@ -275,6 +303,9 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     reticleRef.current = reticleGroup as unknown as THREE.Mesh;
 
     // Resize / orientation handler (DPR cap kept at 2).
+    // CONTRACT: orientation/resize/visualViewport must NEVER change current
+    // radius/theta/phi — only aspect + renderer size. sphericalRef and
+    // framing boost/shift are intentionally untouched here.
     // Listens to window resize + orientationchange + visualViewport so
     // mobile rotation and browser-chrome show/hide keep the canvas fitted.
     const handleResize = () => {
@@ -287,11 +318,30 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
       rendererRef.current.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
       rendererRef.current.setSize(w, h);
     };
+    // orientationchange fires before layout settles: re-fit on next frames too.
+    const handleOrientation = () => {
+      handleResize();
+      requestAnimationFrame(() => handleResize());
+      window.setTimeout(() => handleResize(), 150);
+    };
     window.addEventListener('resize', handleResize);
-    window.addEventListener('orientationchange', handleResize);
+    window.addEventListener('orientationchange', handleOrientation);
     // visualViewport fires on mobile URL-bar collapse / keyboard; cheap re-fit.
     const vv = window.visualViewport;
     if (vv) vv.addEventListener('resize', handleResize);
+    // screen.orientation change (newer mobile browsers) — same preserve-zoom fit.
+    let orientationObj: ScreenOrientation | null = null;
+    let handleScreenOrientation: (() => void) | null = null;
+    try {
+      const so = (window.screen as unknown as { orientation?: ScreenOrientation })?.orientation;
+      if (so && typeof so.addEventListener === 'function') {
+        orientationObj = so;
+        handleScreenOrientation = () => handleOrientation();
+        so.addEventListener('change', handleScreenOrientation);
+      }
+    } catch {
+      // Older browsers: orientationchange listener above already covers rotation.
+    }
 
     // Animation Loop
     let animationFrameId: number;
@@ -301,17 +351,32 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
       animationFrameId = requestAnimationFrame(animate);
       const elapsedTime = clock.getElapsedTime();
 
+      // Sheet/modal framing: additive boost/shift lerped toward targets.
+      // Base radius (sphericalRef) is user-owned; effective adds boost.
+      const fr = framingRef.current;
+      fr.boost += (fr.boostTarget - fr.boost) * 0.08;
+      if (Math.abs(fr.boostTarget - fr.boost) < 0.001) fr.boost = fr.boostTarget;
+      fr.shiftY += (fr.shiftYTarget - fr.shiftY) * 0.08;
+      if (Math.abs(fr.shiftYTarget - fr.shiftY) < 0.001) fr.shiftY = fr.shiftYTarget;
+
       // Smooth camera interpolation towards spherical target
       const s = sphericalRef.current;
-      const targetX = targetCamLookAtRef.current.x + s.radius * Math.sin(s.phi) * Math.sin(s.theta);
-      const targetY = targetCamLookAtRef.current.y + s.radius * Math.cos(s.phi);
-      const targetZ = targetCamLookAtRef.current.z + s.radius * Math.sin(s.phi) * Math.cos(s.theta);
+      const effectiveRadius = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, s.radius + fr.boost));
+      const effectiveLookAtY = targetCamLookAtRef.current.y + fr.shiftY;
+      const effectiveLookAtX = targetCamLookAtRef.current.x;
+      const effectiveLookAtZ = targetCamLookAtRef.current.z;
+      const targetX = effectiveLookAtX + effectiveRadius * Math.sin(s.phi) * Math.sin(s.theta);
+      const targetY = effectiveLookAtY + effectiveRadius * Math.cos(s.phi);
+      const targetZ = effectiveLookAtZ + effectiveRadius * Math.sin(s.phi) * Math.cos(s.theta);
 
       targetCamPosRef.current.set(targetX, targetY, targetZ);
 
       if (cameraRef.current) {
         cameraRef.current.position.lerp(targetCamPosRef.current, 0.08);
-        currentCamLookAtRef.current.lerp(targetCamLookAtRef.current, 0.08);
+        currentCamLookAtRef.current.lerp(
+          new THREE.Vector3(effectiveLookAtX, effectiveLookAtY, effectiveLookAtZ),
+          0.08
+        );
         cameraRef.current.lookAt(currentCamLookAtRef.current);
       }
 
@@ -380,8 +445,15 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
 
     return () => {
       window.removeEventListener('resize', handleResize);
-      window.removeEventListener('orientationchange', handleResize);
+      window.removeEventListener('orientationchange', handleOrientation);
       if (vv) vv.removeEventListener('resize', handleResize);
+      if (orientationObj && handleScreenOrientation) {
+        try {
+          orientationObj.removeEventListener('change', handleScreenOrientation);
+        } catch {
+          // Ignore cleanup failures on older browsers.
+        }
+      }
       cancelAnimationFrame(animationFrameId);
       renderer.dispose();
     };
@@ -463,13 +535,14 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     });
   }, [explosionProgress, dish]);
 
-  // Focus Camera on Selected Ingredient or reset to global
+  // Focus Camera lookAt on Selected Ingredient or reset to global.
+  // NOTE: radius is deliberately NOT touched here (it used to reset on every
+  // explosionProgress tick, fighting user pinch and causing zoom jumps).
+  // Radius ownership: init 5.2/4.6, user pinch/wheel, dish/AR reset below,
+  // and sheet/modal framing boost (additive, see framing effect).
   useEffect(() => {
     if (!selectedIngredientId) {
-      // Global overview: kept at 5.2 (4.6 in AR) inside the 2.2-13 range
-      // to preserve the current framing; users can now zoom out to 13.
       targetCamLookAtRef.current.set(0, 0.4, 0);
-      sphericalRef.current.radius = isARMode ? 4.6 : 5.2;
       return;
     }
 
@@ -484,9 +557,94 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     const curZ = az + (ez - az) * explosionProgress;
 
     targetCamLookAtRef.current.set(curX, curY + 0.1, curZ);
-    // Close inspection distance, kept above MIN_RADIUS 2.2 for detail.
-    sphericalRef.current.radius = 3.2; // Closer inspection distance
-  }, [selectedIngredientId, explosionProgress, dish, isARMode]);
+  }, [selectedIngredientId, explosionProgress, dish]);
+
+  // Reset base overview distance on dish switch / AR toggle.
+  // Skipped while a sheet/modal is open so auto-framing + user pinch win;
+  // the framing effect restores naturally (boost -> 0) on close.
+  useEffect(() => {
+    if (sheetOpen || modalOpen) return;
+    // Only reset when nothing is selected (overview); ingredient focus keeps
+    // the user's current distance so tapping layers never jumps zoom.
+    if (selectedIngredientId) return;
+    sphericalRef.current.radius = isARMode ? 4.6 : 5.2;
+  }, [dish.id, isARMode, sheetOpen, modalOpen, selectedIngredientId]);
+
+  // Sheet/modal auto-framing: shift lookAt down (burger up on screen) +
+  // auto dolly-out so the full burger fits the remaining visible space above
+  // the peek sheet / around centered modals. Additive boost => user pinch
+  // after auto-frame always wins (we never overwrite sphericalRef.radius).
+  // Restore on close = lerp boost/shift back to 0 (base untouched).
+  useEffect(() => {
+    const framingOpen = Boolean(sheetOpen || modalOpen);
+    const wasOpen = prevFramingOpenRef.current;
+    const fr = framingRef.current;
+
+    if (!framingOpen) {
+      fr.boostTarget = 0;
+      fr.shiftYTarget = 0;
+      fr.preOpenBaseRadius = null;
+      fr.userTouchedSinceAuto = false;
+      prevFramingOpenRef.current = false;
+      return;
+    }
+
+    // Newly opened: snapshot base once so later pinch doesn't move the goalpost.
+    if (!wasOpen) {
+      fr.preOpenBaseRadius = sphericalRef.current.radius;
+      fr.userTouchedSinceAuto = false;
+    }
+    const preOpenBase = fr.preOpenBaseRadius ?? sphericalRef.current.radius;
+
+    const containerW = containerRef.current?.clientWidth || window.innerWidth;
+    const containerH = containerRef.current?.clientHeight || window.innerHeight;
+    const aspect = containerW > 0 && containerH > 0 ? containerW / containerH : 0.5;
+    const FOV_TAN = Math.tan(THREE.MathUtils.degToRad(42 / 2)); // 42° vertical FOV
+    const FIT_PER_D = 2 * FOV_TAN; // world units of vertical fit per unit distance (~0.7677)
+
+    // Sheet fraction: 0.58 peek (42dvh), 0.30 expanded (70dvh). Desktop side
+    // cards barely cover height, so dampen the height loss on wide screens.
+    const rawSheetF = Math.max(0.2, Math.min(1, visibleHeightFraction || 1));
+    const sheetF = aspect >= 1 && sheetOpen ? 1 - (1 - rawSheetF) * 0.25 : rawSheetF;
+    // Centered modals dim the canvas: scale down + shift up so the burger
+    // peeks in the visible rim instead of hiding fully behind the card.
+    const MODAL_F = 0.6;
+
+    let fEff = 1;
+    if (sheetOpen && modalOpen) fEff = Math.min(sheetF, MODAL_F);
+    else if (sheetOpen) fEff = sheetF;
+    else if (modalOpen) fEff = MODAL_F;
+
+    if (modalOpen && !sheetOpen) {
+      // Modest context dolly + upward shift for centered cards.
+      const modalNeed = 8.5;
+      fr.boostTarget = Math.max(0, Math.min(MAX_RADIUS - preOpenBase, modalNeed - preOpenBase));
+      fr.shiftYTarget = -0.7;
+      prevFramingOpenRef.current = true;
+      return;
+    }
+
+    // Full-burger fit in the visible top strip (exploded worst case):
+    // height 2.6..-1.8 = 4.4 + 0.6 margin = 5.0 (+8% lens margin),
+    // width pedestal 5.6 + fries overhang ~0.5 = ~6.1 (+8%).
+    const H_OBJ = 5.0 * 1.08;
+    const W_OBJ = 6.1 * 1.08;
+    const needH = H_OBJ / (FIT_PER_D * fEff);
+    const needW = aspect > 0 ? W_OBJ / (FIT_PER_D * aspect) : needH;
+    const required = Math.max(needH, needW);
+    const clampedRequired = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, required));
+    fr.boostTarget = Math.max(0, Math.min(MAX_RADIUS - preOpenBase, clampedRequired - preOpenBase));
+
+    // Shift the lookAt down so the burger sits centered in the visible top
+    // strip (visible center is (1-f)/2 above full center). Factor 0.85 leaves
+    // room for the header; clamped so close-ups never fly off-screen.
+    const effectiveD = Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, preOpenBase + fr.boostTarget));
+    const visibleFitH = FIT_PER_D * effectiveD;
+    const offsetUp = ((1 - fEff) / 2) * visibleFitH * 0.85;
+    fr.shiftYTarget = Math.max(-2.0, Math.min(0, -offsetUp));
+
+    prevFramingOpenRef.current = true;
+  }, [sheetOpen, modalOpen, visibleHeightFraction, dish.id]);
 
   // ---- Gesture helpers (hit-test + clamp) ----
   const clampRadius = (v: number) => Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, v));
@@ -517,6 +675,7 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
 
   // Wheel = zoom only. Attached as a native non-passive listener so
   // preventDefault reliably stops page scroll (page is locked anyway).
+  // User wheel always wins over sheet auto-framing (boost is additive).
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -527,10 +686,11 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
       sphericalRef.current.radius = clampRadius(
         sphericalRef.current.radius + deltaY * WHEEL_FACTOR
       );
+      if (sheetOpen || modalOpen) framingRef.current.userTouchedSinceAuto = true;
     };
     el.addEventListener('wheel', onWheelNative, { passive: false });
     return () => el.removeEventListener('wheel', onWheelNative);
-  }, []);
+  }, [sheetOpen, modalOpen]);
 
   // Unified Pointer Events gesture state machine:
   // - 1 pointer starting on burger -> drag rotates; starting on background -> no-op
@@ -579,6 +739,8 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
     // Pinch zoom takes over whenever two pointers are down.
+    // User pinch always wins over sheet auto-framing (boost is additive,
+    // never overwritten here).
     if (activePointersRef.current.size >= 2) {
       const dist = getActivePinchDist();
       if (dist !== null) {
@@ -587,6 +749,7 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
           sphericalRef.current.radius = clampRadius(
             sphericalRef.current.radius - delta * PINCH_FACTOR
           );
+          framingRef.current.userTouchedSinceAuto = true;
         }
         pinchPrevDistRef.current = dist;
       }
