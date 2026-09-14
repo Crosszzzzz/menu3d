@@ -1,8 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { Dish, Ingredient } from '../types/dish';
-import { buildDish3DModel } from './dishModelBuilder';
+import { buildDish3DModel, cancelScannedLoads, retryScannedSlot } from './dishModelBuilder';
+import { IngredientLoadStatus, disposeGroup } from './assetLoader';
 import { isCardResizing } from '../utils/resizeGuard';
 
 interface WebARCanvasProps {
@@ -158,6 +159,37 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
 
   // Video stream state
   const streamRef = useRef<MediaStream | null>(null);
+
+  // Scanned-burger GLB pipeline states (burger path only; poke untouched).
+  // Filled via the builder `onStatus` callback: one entry per scan slot that
+  // started loading. Stand-ins stay rendered until their slot swaps.
+  const [scanStatuses, setScanStatuses] = useState<Map<string, IngredientLoadStatus>>(new Map());
+  const [scanErrors, setScanErrors] = useState<Map<string, string>>(new Map());
+
+  const handleScanStatus = useCallback(
+    (id: string, status: IngredientLoadStatus, err?: string) => {
+      setScanStatuses((prev) => {
+        const next = new Map(prev);
+        next.set(id, status);
+        return next;
+      });
+      setScanErrors((prev) => {
+        const next = new Map(prev);
+        if (err) next.set(id, err);
+        else next.delete(id);
+        return next;
+      });
+    },
+    []
+  );
+
+  // Single-slot retry: re-invokes loadIngredient for that id only.
+  const handleRetryScan = useCallback(
+    (ingredientId: string) => {
+      retryScannedSlot(dish, ingredientId, ingredientMeshesRef.current, handleScanStatus);
+    },
+    [dish, handleScanStatus]
+  );
 
   // Setup Camera Video Stream for WebAR
   useEffect(() => {
@@ -515,30 +547,37 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     };
   }, [dish.id]);
 
-  // Update Dish 3D Model when dish changes or exclusions change
+  // Update Dish 3D Model when dish changes or exclusions change.
+  // Burger path kicks lazy per-slot GLB loads (stand-ins first); poke stays
+  // fully synchronous. Cleanup cancels stale swaps and disposes GPU assets.
   useEffect(() => {
     if (!sceneRef.current) return;
 
     if (dishGroupRef.current) {
       sceneRef.current.remove(dishGroupRef.current);
-      dishGroupRef.current.traverse((child) => {
-        if ((child as THREE.Mesh).isMesh) {
-          const m = child as THREE.Mesh;
-          m.geometry?.dispose();
-          if (Array.isArray(m.material)) {
-            m.material.forEach(mat => mat.dispose());
-          } else {
-            m.material?.dispose();
-          }
-        }
-      });
+      disposeGroup(dishGroupRef.current);
+      dishGroupRef.current = null;
     }
 
-    const { group, ingredientMeshes } = buildDish3DModel(dish);
+    setScanStatuses(new Map());
+    setScanErrors(new Map());
+    const { group, ingredientMeshes } = buildDish3DModel(dish, { onStatus: handleScanStatus });
     dishGroupRef.current = group;
     ingredientMeshesRef.current = ingredientMeshes;
     sceneRef.current.add(group);
-  }, [dish]);
+
+    return () => {
+      // Generation token++ discards late resolutions; dispose replaced
+      // groups (geometries + materials + textures) so dish switches leak no
+      // GPU memory. No object URLs are created by fetch+parseAsync.
+      cancelScannedLoads();
+      if (dishGroupRef.current) {
+        sceneRef.current?.remove(dishGroupRef.current);
+        disposeGroup(dishGroupRef.current);
+        dishGroupRef.current = null;
+      }
+    };
+  }, [dish, handleScanStatus]);
 
   // Update Visibility of Excluded Ingredients (e.g. "Sin pepinillo" customizer).
   // Static props ignore exclusion toggles — they are never food.
@@ -1089,6 +1128,51 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
           <span>Mover a otra mesa</span>
           <span className="text-amber-400">↻</span>
         </button>
+      )}
+
+      {/* Scan pipeline statuses (burger path only): per-layer loading / ready /
+          error chips. Errors keep the TEMP stand-in rendered and offer a
+          single-slot retry that re-invokes loadIngredient for that id only. */}
+      {dish.id === 'wagyu-smash-burger' && scanStatuses.size > 0 && (
+        <div
+          id="scan-status-panel"
+          className="absolute z-20 pointer-events-none top-[calc(env(safe-area-inset-top)+64px)] left-2 sm:top-20 sm:left-4 flex flex-col gap-1.5 max-w-[220px]"
+        >
+          {Array.from(scanStatuses.entries()).map(([id, status]) => {
+            const ing = dish.ingredients.find((i) => i.id === id);
+            const label = ing ? ing.name : id;
+            const dot =
+              status === 'ready'
+                ? 'bg-emerald-400'
+                : status === 'error'
+                  ? 'bg-red-400'
+                  : 'bg-amber-400 animate-pulse';
+            return (
+              <div
+                key={id}
+                id={`scan-status-${id}`}
+                title={status === 'error' ? (scanErrors.get(id) ?? 'Load failed') : `${label}: ${status}`}
+                className="pointer-events-auto flex items-center gap-2 bg-stone-900/85 backdrop-blur-md border border-white/15 px-2.5 py-1.5 rounded-lg text-[11px] text-stone-200 shadow-lg"
+              >
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
+                <span className="truncate flex-1">{label}</span>
+                <span className="text-stone-400 shrink-0">{status}</span>
+                {status === 'error' && (
+                  <button
+                    id={`scan-retry-${id}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleRetryScan(id);
+                    }}
+                    className="min-h-[32px] px-2 py-0.5 bg-amber-500 hover:bg-amber-400 text-stone-950 font-semibold rounded-md text-[11px] transition-all active:scale-95 shrink-0"
+                  >
+                    Retry
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
       )}
 
       {/* Quick Camera Hint helper */}
