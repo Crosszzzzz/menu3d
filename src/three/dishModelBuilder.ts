@@ -1,5 +1,14 @@
 import * as THREE from 'three';
 import { Dish } from '../types/dish';
+import {
+  SCAN_SLOTS,
+  ScanSlot,
+  IngredientLoadStatus,
+  loadIngredient,
+  getScanSlot,
+  disposeGroup,
+  collectLiveTextures,
+} from './assetLoader';
 
 /**
  * Photorealistic procedural PBR pipeline (zero binary assets).
@@ -269,9 +278,30 @@ function paintCeramicGlaze(ctx: CanvasRenderingContext2D, s: number): void {
 }
 
 /**
- * Builds the 3D visual representation of a dish
+ * Builds the 3D visual representation of a dish.
+ *
+ * Burger path: returns sync TEMP procedural stand-ins for the 5 scan slots
+ * (clamped to the SCAN_SLOTS anchor table) and kicks 5 lazy per-ingredient
+ * GLB loads that swap in place on resolve. Group identity stays stable so
+ * exploded lerp, raycast, pins, exclusion, AR scale, and auto-fit never
+ * change. Poke path is untouched (fully synchronous, no scans).
  */
-export function buildDish3DModel(dish: Dish): {
+export interface BuildDishOptions {
+  onStatus?: (ingredientId: string, status: IngredientLoadStatus, error?: string) => void;
+}
+
+/** Generation token: dish switch / cleanup cancels stale in-flight swaps. */
+let scanGeneration = 0;
+
+/** Cancel pending scanned swaps (dish switch or unmount). */
+export function cancelScannedLoads(): void {
+  scanGeneration += 1;
+}
+
+export function buildDish3DModel(
+  dish: Dish,
+  opts?: BuildDishOptions
+): {
   group: THREE.Group;
   ingredientMeshes: Map<string, THREE.Object3D>;
 } {
@@ -280,7 +310,7 @@ export function buildDish3DModel(dish: Dish): {
   const ingredientMeshes = new Map<string, THREE.Object3D>();
 
   if (dish.id === 'wagyu-smash-burger') {
-    buildBurgerModel(dish, group, ingredientMeshes);
+    buildBurgerModel(dish, group, ingredientMeshes, opts);
   } else {
     buildPokeModel(dish, group, ingredientMeshes);
   }
@@ -382,7 +412,8 @@ export function buildWoodTable(): THREE.Group {
 function buildBurgerModel(
   dish: Dish,
   parentGroup: THREE.Group,
-  ingredientMeshes: Map<string, THREE.Object3D>
+  ingredientMeshes: Map<string, THREE.Object3D>,
+  opts?: BuildDishOptions
 ) {
   const brioche = makePBRSet(paintBrioche, {
     size: 1024,
@@ -899,6 +930,120 @@ function buildBurgerModel(
     parentGroup.add(friesGroup);
     ingredientMeshes.set(friesIng.id, friesGroup);
   }
+
+  // TEMP stand-ins: clamp the 5 scan-slot groups to the exact SCAN_SLOTS
+  // anchor table so the pipeline is verifiable before scans land. The other
+  // 6 layers (cheese, onion, pickles, sauce, fries, plate/table) stay
+  // procedural and untouched. Stand-ins are NOT final visuals.
+  for (const slot of SCAN_SLOTS) {
+    const standin = ingredientMeshes.get(slot.ingredientId);
+    if (standin) {
+      clampStandinToDiameter(standin as THREE.Group, slot.targetDiameter);
+      standin.userData.isScanStandin = true;
+    }
+  }
+
+  kickScannedSwaps(dish, ingredientMeshes, opts?.onStatus);
+}
+
+/**
+ * Uniformly scale a TEMP stand-in group so its horizontal diameter matches
+ * the scan anchor table (tolerance +/-5% after swap). Applied before the
+ * group position is anchored, so the dishes.ts anchor is preserved.
+ */
+function clampStandinToDiameter(group: THREE.Group, targetDiameter: number): void {
+  const box = new THREE.Box3().setFromObject(group);
+  const size = box.getSize(new THREE.Vector3());
+  const current = Math.max(size.x, size.z);
+  if (current > 1e-6) {
+    group.scale.multiplyScalar(targetDiameter / current);
+  }
+  group.updateMatrixWorld(true);
+}
+
+/**
+ * Swap one scanned GLB into its stable Group (in-place child replacement).
+ * Group identity, position anchor, and userData survive, so exploded lerp,
+ * raycast select, pins, exclusion, AR scale, and auto-fit keep working.
+ * One failure never blocks the other slots; the stand-in stays + onStatus
+ * reports the error for retry.
+ */
+function swapScannedIntoSlot(
+  slot: ScanSlot,
+  dish: Dish,
+  ingredientMeshes: Map<string, THREE.Object3D>,
+  generation: number,
+  onStatus?: BuildDishOptions['onStatus']
+): void {
+  const target = ingredientMeshes.get(slot.ingredientId);
+  if (!target) return;
+  onStatus?.(slot.ingredientId, 'loading');
+  loadIngredient(slot, generation).then(
+    (scanned) => {
+      if (generation !== scanGeneration) {
+        disposeGroup(scanned);
+        return;
+      }
+      const current = ingredientMeshes.get(slot.ingredientId);
+      if (!current) {
+        disposeGroup(scanned);
+        return;
+      }
+      // Protect PBR canvas textures still shared with sibling procedural
+      // layers (e.g. brioche set used by both buns).
+      const live = [...ingredientMeshes.values()].filter((g) => g !== current);
+      const liveTextures = collectLiveTextures(live);
+      for (const child of [...current.children]) {
+        current.remove(child);
+        disposeGroup(child, liveTextures);
+      }
+      (current as THREE.Group).scale.set(1, 1, 1);
+      for (const child of [...scanned.children]) {
+        current.add(child);
+      }
+      current.userData.isScanStandin = false;
+      const ing = dish.ingredients.find((i) => i.id === slot.ingredientId);
+      if (ing) current.position.set(...ing.assembledPosition);
+      onStatus?.(slot.ingredientId, 'ready');
+    },
+    (err: unknown) => {
+      if (generation !== scanGeneration) return;
+      onStatus?.(
+        slot.ingredientId,
+        'error',
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+  );
+}
+
+/** Kick the 5 lazy per-ingredient loads (burger path only, <=5 in flight). */
+function kickScannedSwaps(
+  dish: Dish,
+  ingredientMeshes: Map<string, THREE.Object3D>,
+  onStatus?: BuildDishOptions['onStatus']
+): void {
+  if (dish.id !== 'wagyu-smash-burger') return;
+  const generation = scanGeneration;
+  for (const slot of SCAN_SLOTS) {
+    if (!ingredientMeshes.has(slot.ingredientId)) continue;
+    swapScannedIntoSlot(slot, dish, ingredientMeshes, generation, onStatus);
+  }
+}
+
+/**
+ * Retry a single scan slot (re-invokes loadIngredient for that id only).
+ * Used by the per-layer retry chips in WebARCanvas.
+ */
+export function retryScannedSlot(
+  dish: Dish,
+  ingredientId: string,
+  ingredientMeshes: Map<string, THREE.Object3D>,
+  onStatus?: BuildDishOptions['onStatus']
+): void {
+  const slot = getScanSlot(ingredientId);
+  if (!slot || !ingredientMeshes.has(ingredientId)) return;
+  swapScannedIntoSlot(slot, dish, ingredientMeshes, scanGeneration, onStatus);
 }
 
 /**
