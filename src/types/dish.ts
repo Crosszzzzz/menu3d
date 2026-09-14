@@ -36,6 +36,8 @@ export interface Ingredient {
   layerOrder: number;
   isCustomizable: boolean;
   isExcluded?: boolean;
+  /** Optional scan GLB URL (data-driven later; unused this slice). */
+  modelUrl?: string;
 }
 
 export interface Dish {  id: string;
