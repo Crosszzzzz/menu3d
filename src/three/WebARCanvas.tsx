@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { Dish, Ingredient } from '../types/dish';
 import { buildDish3DModel } from './dishModelBuilder';
 import { isCardResizing } from '../utils/resizeGuard';
@@ -37,6 +38,20 @@ interface ProjectedPin {
   visible: boolean;
 }
 
+/**
+ * Static-prop guard: any object tagged `userData.isStaticProp` (ceramic
+ * plate, wood table) is presentation only — skipped by exploded lerp,
+ * levitation, raycast select, pins, exclusion toggles, and auto-fit math.
+ */
+function isStaticProp(obj: THREE.Object3D | null): boolean {
+  let current: THREE.Object3D | null | undefined = obj;
+  while (current) {
+    if (current.userData && current.userData.isStaticProp === true) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
 export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   dish,
   explosionProgress,
@@ -66,6 +81,7 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   const shadowPlaneRef = useRef<THREE.Mesh | null>(null);
   const studioFloorRef = useRef<THREE.Group | null>(null);
   const reticleRef = useRef<THREE.Mesh | null>(null);
+  const envTextureRef = useRef<THREE.Texture | null>(null);
 
   // Interaction & Camera tracking state
   // Gesture contract (see header docs):
@@ -229,15 +245,25 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.15;
+    renderer.toneMappingExposure = 1.0;
     rendererRef.current = renderer;
 
-    // Lighting Setup - Gastronomic Studio Atmosphere
-    const ambientLight = new THREE.AmbientLight(0xfff7ed, 0.95);
+    // Image-based lighting for PBR food materials: neutral studio room,
+    // capped at 0.5 so highlights stay broken (no plastic look). Zero new
+    // lights added — the existing 4-light rig is only retuned below.
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const envScene = new RoomEnvironment();
+    scene.environment = pmrem.fromScene(envScene, 0.04).texture;
+    scene.environmentIntensity = 0.5;
+    envTextureRef.current = scene.environment as THREE.Texture;
+    pmrem.dispose();
+
+    // Lighting Setup - Gastronomic Studio Atmosphere (photoreal retune)
+    const ambientLight = new THREE.AmbientLight(0xfff7ed, 0.5);
     scene.add(ambientLight);
 
     // Key Light with soft shadow casting
-    const keyLight = new THREE.DirectionalLight(0xffffff, 2.1);
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.4);
     keyLight.position.set(3.5, 6.0, 3.5);
     keyLight.castShadow = true;
     keyLight.shadow.mapSize.width = 2048;
@@ -252,12 +278,12 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     scene.add(keyLight);
 
     // Warm Rim light for appetizing highlights on meat and glaze
-    const rimLight = new THREE.DirectionalLight(0xfbbf24, 1.3);
+    const rimLight = new THREE.DirectionalLight(0xfbbf24, 1.0);
     rimLight.position.set(-4.0, 3.5, -3.5);
     scene.add(rimLight);
 
     // Front soft fill light
-    const fillLight = new THREE.DirectionalLight(0xe0e7ff, 0.65);
+    const fillLight = new THREE.DirectionalLight(0xe0e7ff, 0.4);
     fillLight.position.set(0, 1.5, 4.5);
     scene.add(fillLight);
 
@@ -409,9 +435,11 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
         reticleRef.current.scale.set(pulse, 1, pulse);
       }
 
-      // Subtle levitation breath on exploded layers to give physical floating feel
+      // Subtle levitation breath on exploded layers to give physical floating feel.
+      // Static presentation props (plate/table) never wobble.
       if (dishGroupRef.current && explosionProgress > 0.05) {
         ingredientMeshesRef.current.forEach((obj, id) => {
+          if (isStaticProp(obj)) return;
           const ing = dish.ingredients.find(i => i.id === id);
           if (ing && ing.explodedPosition) {
             const floatOffset = Math.sin(elapsedTime * 2.2 + ing.layerOrder * 0.7) * 0.02 * explosionProgress;
@@ -433,6 +461,7 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
         const rect = containerRef.current.getBoundingClientRect();
 
         ingredientMeshesRef.current.forEach((obj, id) => {
+          if (isStaticProp(obj)) return;
           const ing = dish.ingredients.find(i => i.id === id);
           if (!ing || excludedIngredientIds.includes(id) || id === 'ceramic-slate') return;
 
@@ -478,6 +507,10 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
         }
       }
       cancelAnimationFrame(animationFrameId);
+      if (envTextureRef.current) {
+        envTextureRef.current.dispose();
+        envTextureRef.current = null;
+      }
       renderer.dispose();
     };
   }, [dish.id]);
@@ -507,18 +540,25 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     sceneRef.current.add(group);
   }, [dish]);
 
-  // Update Visibility of Excluded Ingredients (e.g. "Sin pepinillo" customizer)
+  // Update Visibility of Excluded Ingredients (e.g. "Sin pepinillo" customizer).
+  // Static props ignore exclusion toggles — they are never food.
   useEffect(() => {
     ingredientMeshesRef.current.forEach((mesh, id) => {
+      if (isStaticProp(mesh)) {
+        mesh.visible = true;
+        return;
+      }
       const isExcluded = excludedIngredientIds.includes(id);
       mesh.visible = !isExcluded;
     });
   }, [excludedIngredientIds]);
 
-  // Update Studio vs. AR Floor visibility
+  // Update Studio vs. AR Floor visibility.
+  // Burger path stages on its own wood table, so the studio pedestal is
+  // hidden for the burger only; the poke path keeps the pedestal untouched.
   useEffect(() => {
     if (studioFloorRef.current) {
-      studioFloorRef.current.visible = !isARMode;
+      studioFloorRef.current.visible = !isARMode && dish.id !== 'wagyu-smash-burger';
     }
     if (shadowPlaneRef.current) {
       shadowPlaneRef.current.visible = true; // Still catches shadows in both
@@ -526,13 +566,14 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     if (reticleRef.current) {
       reticleRef.current.visible = isARMode && isPlacingOnSurface;
     }
-  }, [isARMode, isPlacingOnSurface]);
+  }, [isARMode, isPlacingOnSurface, dish.id]);
 
-  // Update Exploded Positions Interpolation
+  // Update Exploded Positions Interpolation.
+  // Static props (plate/table) never lerp — they stay put at 0 and at 1.
   useEffect(() => {
     dish.ingredients.forEach((ing) => {
       const mesh = ingredientMeshesRef.current.get(ing.id);
-      if (!mesh) return;
+      if (!mesh || isStaticProp(mesh)) return;
 
       const [ax, ay, az] = ing.assembledPosition;
       const [ex, ey, ez] = ing.explodedPosition;
@@ -701,7 +742,6 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
 
   // ---- Gesture helpers (hit-test + clamp) ----
   const clampRadius = (v: number) => Math.max(MIN_RADIUS, Math.min(MAX_RADIUS, v));
-
   // Returns true when the pointer lands on the burger / an ingredient mesh.
   // Background / empty space returns false. Used for hover cursor + tap
   // raycast only — single-drag rotate works ANYWHERE (burger or background).
@@ -900,9 +940,12 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     raycaster.setFromCamera(mouse, cameraRef.current);
     const intersects = raycaster.intersectObjects(dishGroupRef.current.children, true);
 
-    if (intersects.length > 0) {
+    // First non-static hit wins: tapping plate/table selects nothing, and
+    // props never occlude food taps behind them.
+    for (const hit of intersects) {
+      if (isStaticProp(hit.object)) continue;
       // Walk up the parent hierarchy to locate user data ingredientId
-      let current: THREE.Object3D | null = intersects[0].object;
+      let current: THREE.Object3D | null = hit.object;
       let foundId: string | null = null;
 
       while (current && current !== dishGroupRef.current) {
@@ -920,6 +963,8 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
           return;
         }
       }
+      // Hit food geometry with no ingredient id: stop, don't deselect hunt.
+      break;
     }
 
     // Tapping background or empty space deselects ingredient

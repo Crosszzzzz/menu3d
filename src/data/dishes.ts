@@ -250,8 +250,8 @@ export const DISHES_DATA: Dish[] = [
         chefTips: 'Estructura la base para proyectar las sombras y mantener el equilibrio visual del plato.',
         icon: '🍽️',
         colorHex: '#252932',
-        explodedPosition: [0, -0.15, 0],
-        assembledPosition: [0, -0.15, 0],
+        explodedPosition: [0, 0, 0],
+        assembledPosition: [0, 0, 0],
         layerOrder: 11,
         isCustomizable: false
       }

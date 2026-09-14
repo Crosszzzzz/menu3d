@@ -38,8 +38,7 @@ export interface Ingredient {
   isExcluded?: boolean;
 }
 
-export interface Dish {
-  id: string;
+export interface Dish {  id: string;
   name: string;
   subtitle: string;
   tagline: string;
@@ -58,3 +57,19 @@ export interface Dish {
   dietaryTags: string[];
   ingredients: Ingredient[];
 }
+
+/**
+ * Scene-units to meters calibration (burger 2.72u ~= 0.11m real diameter).
+ * Scene math (camera, exploded offsets, auto-fit) stays in units; multiply
+ * by METERS_PER_UNIT only when real-world scale is needed (AR placement).
+ */
+export const METERS_PER_UNIT = 0.04;
+
+/**
+ * Static-prop tagging contract (presentation props only, e.g. ceramic plate
+ * and wood table): any Object3D with `userData.isStaticProp === true` MUST
+ * be skipped by exploded-view lerp, levitation wobble, tap raycast, spatial
+ * pins, exclusion toggles, and auto-fit height math. Props stay static in
+ * every state. (Typed via userData at runtime; declared here for discovery.)
+ */
+export type StaticPropFlag = { isStaticProp?: boolean };
