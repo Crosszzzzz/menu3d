@@ -1,10 +1,56 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { Dish, Ingredient } from '../types/dish';
+import { Dish, Ingredient, METERS_PER_UNIT } from '../types/dish';
 import { buildDish3DModel, cancelScannedLoads, retryScannedSlot } from './dishModelBuilder';
 import { IngredientLoadStatus, disposeGroup } from './assetLoader';
 import { isCardResizing } from '../utils/resizeGuard';
+
+/**
+ * Minimal structural WebXR surface used by the native AR path. Declared
+ * locally (instead of DOM lib XR types) so the build never depends on which
+ * XR IDL the TS DOM lib ships; every access is feature-guarded at runtime
+ * and the video-passthrough fallback covers unsupported browsers.
+ */
+interface ARHitTestSource {
+  cancel(): void;
+}
+interface ARSession extends EventTarget {
+  requestReferenceSpace(type: string): Promise<unknown>;
+  requestHitTestSource(init: { space: unknown }): Promise<ARHitTestSource>;
+  end(): Promise<void>;
+}
+interface XRSystemLike {
+  isSessionSupported(mode: string): Promise<boolean>;
+  requestSession(mode: string, init?: Record<string, unknown>): Promise<ARSession>;
+}
+interface ARHitPose {
+  transform: {
+    position: { x: number; y: number; z: number };
+    orientation: { x: number; y: number; z: number; w: number };
+  };
+}
+interface ARHitResult {
+  getPose(space: unknown): ARHitPose | null | undefined;
+}
+interface ARFrame {
+  getHitTestResults(source: ARHitTestSource): ARHitResult[];
+}
+
+function getXRSystem(): XRSystemLike | undefined {
+  try {
+    const nav = navigator as unknown as { xr?: XRSystemLike };
+    if (nav.xr && typeof nav.xr.isSessionSupported === 'function') return nav.xr;
+  } catch {
+    // Non-secure contexts and old browsers: no WebXR, fallback path applies.
+  }
+  return undefined;
+}
+
+/** User-adjustable AR scale range (multiplier over real-world scale). */
+const AR_SCALE_MIN = 0.5;
+const AR_SCALE_MAX = 2.0;
+const clampARScale = (v: number): number => Math.max(AR_SCALE_MIN, Math.min(AR_SCALE_MAX, v));
 
 interface WebARCanvasProps {
   dish: Dish;
@@ -156,6 +202,33 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   const [isPlacingOnSurface, setIsPlacingOnSurface] = useState<boolean>(true);
   const [isARPlaced, setIsARPlaced] = useState<boolean>(false);
   const [arScale, setArScale] = useState<number>(1.0);
+  // Native WebXR immersive-ar state. null = still probing; false = unsupported
+  // (video-passthrough fallback applies). true alone does not start a session:
+  // sessions only start from the AR-mode toggle (user gesture).
+  const [xrSupported, setXrSupported] = useState<boolean | null>(null);
+  const [isPresenting, setIsPresenting] = useState<boolean>(false);
+  const [nativeARError, setNativeARError] = useState<string | null>(null);
+
+  // Native AR session refs (never re-created per frame; no per-frame allocs).
+  const xrSessionRef = useRef<ARSession | null>(null);
+  const xrStartingRef = useRef<boolean>(false);
+  const xrHitSourceRef = useRef<ARHitTestSource | null>(null);
+  const xrSelectHandlerRef = useRef<((ev: Event) => void) | null>(null);
+  const xrEndHandlerRef = useRef<((ev: Event) => void) | null>(null);
+  const xrSessionStartHandlerRef = useRef<(() => void) | null>(null);
+  const xrSessionEndHandlerRef = useRef<(() => void) | null>(null);
+  // Latest viewer hit-test pose (reused Vector3/Quaternion, no allocations).
+  const hitPoseRef = useRef<{ has: boolean; pos: THREE.Vector3; quat: THREE.Quaternion }>({
+    has: false,
+    pos: new THREE.Vector3(),
+    quat: new THREE.Quaternion(),
+  });
+  // Ref mirrors for values the XR animation loop reads (its closure is
+  // mounted per dish.id and would otherwise go stale).
+  const arScaleRef = useRef(1.0);
+  arScaleRef.current = arScale;
+  const isPlacingRef = useRef(true);
+  isPlacingRef.current = isPlacingOnSurface;
 
   // Video stream state
   const streamRef = useRef<MediaStream | null>(null);
@@ -191,12 +264,238 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     [dish, handleScanStatus]
   );
 
+  // ---- Native WebXR immersive-ar path (tap-to-place on any flat surface) ----
+  // Estudio 3D is untouched: all of this only runs while an XR session is
+  // presenting. When WebXR is missing (desktop, insecure context, old
+  // browser) the video-passthrough preview below stays as the fallback.
+  const isPresentingXR = useCallback((): boolean => {
+    try {
+      return rendererRef.current?.xr.isPresenting === true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const setWoodTableVisible = useCallback((visible: boolean) => {
+    dishGroupRef.current?.traverse((o) => {
+      if (o.name === 'prop-wood-table') o.visible = visible;
+    });
+  }, []);
+
+  const applyARScale = useCallback(() => {
+    const group = dishGroupRef.current;
+    if (!group) return;
+    // Immersive sessions render in meters: convert scene units so the dish
+    // defaults to real-world size (burger 2.6u ~= 10cm). The fallback preview
+    // keeps scene units and the slider acts as a plain multiplier there.
+    group.scale.setScalar(
+      isPresentingXR() ? METERS_PER_UNIT * arScaleRef.current : arScaleRef.current
+    );
+  }, [isPresentingXR]);
+
+  const restoreStudioPresentation = useCallback(() => {
+    const group = dishGroupRef.current;
+    if (group) {
+      group.position.set(0, 0, 0);
+      group.quaternion.identity();
+      group.scale.setScalar(1);
+    }
+    setWoodTableVisible(true);
+    if (shadowPlaneRef.current) shadowPlaneRef.current.position.set(0, -0.01, 0);
+  }, [setWoodTableVisible]);
+
+  /** Anchor the dish at the live hit-test pose (native sessions only). */
+  const placeDishAtHit = useCallback(() => {
+    const hit = hitPoseRef.current;
+    const group = dishGroupRef.current;
+    if (!hit.has || !group) return;
+    group.position.copy(hit.pos);
+    group.quaternion.copy(hit.quat);
+    applyARScale();
+    if (shadowPlaneRef.current) {
+      shadowPlaneRef.current.position.set(hit.pos.x, hit.pos.y + 0.001, hit.pos.z);
+    }
+    setIsPlacingOnSurface(false);
+    setIsARPlaced(true);
+  }, [applyARScale]);
+
+  const endNativeAR = useCallback(async () => {
+    const session = xrSessionRef.current;
+    xrSessionRef.current = null;
+    if (xrHitSourceRef.current) {
+      try {
+        xrHitSourceRef.current.cancel();
+      } catch {
+        // Already cancelled; safe to ignore.
+      }
+      xrHitSourceRef.current = null;
+    }
+    hitPoseRef.current.has = false;
+    if (session) {
+      // Detach first so our own teardown never re-triggers the exit cascade.
+      if (xrSelectHandlerRef.current) {
+        try {
+          session.removeEventListener('select', xrSelectHandlerRef.current);
+        } catch {
+          // Listener already gone; safe to ignore.
+        }
+        xrSelectHandlerRef.current = null;
+      }
+      if (xrEndHandlerRef.current) {
+        try {
+          session.removeEventListener('end', xrEndHandlerRef.current);
+        } catch {
+          // Listener already gone; safe to ignore.
+        }
+        xrEndHandlerRef.current = null;
+      }
+      try {
+        await session.end();
+      } catch {
+        // Already ended by the system; safe to ignore.
+      }
+    }
+    restoreStudioPresentation();
+  }, [restoreStudioPresentation]);
+
+  const startNativeAR = useCallback(async (): Promise<boolean> => {
+    if (xrSessionRef.current || xrStartingRef.current) return true;
+    const renderer = rendererRef.current;
+    const container = containerRef.current;
+    const xr = getXRSystem();
+    if (!renderer || !container || !xr) return false;
+    xrStartingRef.current = true;
+    try {
+      // Any horizontal plane qualifies (table or floor): no plane-type or
+      // classification filter, so hit-test accepts whatever the device finds.
+      renderer.xr.enabled = true;
+      const session = await xr.requestSession('immersive-ar', {
+        requiredFeatures: ['hit-test'],
+        optionalFeatures: ['local-floor', 'dom-overlay'],
+        domOverlay: { root: container },
+      });
+      xrSessionRef.current = session;
+      const viewerSpace = await session.requestReferenceSpace('viewer');
+      const hitSource = await session.requestHitTestSource({ space: viewerSpace });
+      xrHitSourceRef.current = hitSource;
+      const onSelect = (): void => {
+        if (isPlacingRef.current) placeDishAtHit();
+      };
+      const onEnd = (): void => {
+        // System-side exit (headset back gesture): clean up and leave AR mode.
+        void endNativeAR();
+        onToggleARMode(false);
+      };
+      xrSelectHandlerRef.current = onSelect;
+      xrEndHandlerRef.current = onEnd;
+      session.addEventListener('select', onSelect);
+      session.addEventListener('end', onEnd);
+      const setSession = renderer.xr.setSession.bind(renderer.xr) as unknown as (
+        s: ARSession
+      ) => Promise<void>;
+      await setSession(session);
+      // Session live: studio-only props off, real-world scale, start placing.
+      if (studioFloorRef.current) studioFloorRef.current.visible = false;
+      setWoodTableVisible(false);
+      applyARScale();
+      hitPoseRef.current.has = false;
+      setNativeARError(null);
+      setIsPlacingOnSurface(true);
+      setIsARPlaced(false);
+      return true;
+    } catch {
+      // Native start failed (no ARCore/ARKit, transient activation lost,
+      // hit-test unavailable): tear down quietly, the caller falls back to
+      // the camera preview.
+      await endNativeAR();
+      return false;
+    } finally {
+      xrStartingRef.current = false;
+    }
+  }, [applyARScale, endNativeAR, onToggleARMode, placeDishAtHit, setWoodTableVisible]);
+
+  // Probe immersive-ar support once (HTTPS/localhost only; anything else
+  // resolves false and the video fallback applies).
+  useEffect(() => {
+    let cancelled = false;
+    const xr = getXRSystem();
+    if (!xr) {
+      setXrSupported(false);
+      return;
+    }
+    xr.isSessionSupported('immersive-ar').then(
+      (ok) => {
+        if (!cancelled) setXrSupported(ok);
+      },
+      () => {
+        if (!cancelled) setXrSupported(false);
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * Per-frame viewer hit-test while presenting. Drives the reticle from the
+   * live pose on ANY detected plane (table or floor, no filtering) and caches
+   * the pose for tap-to-place. Best-effort: a bad frame only hides the
+   * reticle, it never breaks rendering. Zero allocations per frame.
+   */
+  const runXRHitTest = useCallback((elapsedTime: number, frame?: unknown) => {
+    const renderer = rendererRef.current;
+    const reticle = reticleRef.current as unknown as THREE.Group | null;
+    const src = xrHitSourceRef.current;
+    if (!renderer || !reticle || !src || !frame) return;
+    const refSpace: unknown = renderer.xr.getReferenceSpace();
+    if (!refSpace) return;
+    let tracked = false;
+    try {
+      const results = (frame as ARFrame).getHitTestResults(src);
+      if (results.length > 0) {
+        const pose = results[0].getPose(refSpace);
+        if (pose) {
+          hitPoseRef.current.has = true;
+          hitPoseRef.current.pos.set(
+            pose.transform.position.x,
+            pose.transform.position.y,
+            pose.transform.position.z
+          );
+          hitPoseRef.current.quat.set(
+            pose.transform.orientation.x,
+            pose.transform.orientation.y,
+            pose.transform.orientation.z,
+            pose.transform.orientation.w
+          );
+          if (isPlacingRef.current) {
+            reticle.visible = true;
+            reticle.position.copy(hitPoseRef.current.pos);
+            reticle.quaternion.copy(hitPoseRef.current.quat);
+            // Reticle geometry is ~0.9u radius; render it at ~15cm in meters.
+            const pulse = 0.16 * (1 + Math.sin(elapsedTime * 4) * 0.08);
+            reticle.scale.set(pulse, 1, pulse);
+          } else {
+            reticle.visible = false;
+          }
+          tracked = true;
+        }
+      }
+    } catch {
+      // Hit-test is best-effort per frame; fall through to hide the reticle.
+    }
+    if (!tracked) {
+      hitPoseRef.current.has = false;
+      if (isPlacingRef.current) reticle.visible = false;
+    }
+  }, []);
+
   // Setup Camera Video Stream for WebAR
   useEffect(() => {
     let active = true;
 
     async function initCamera() {
       if (!isARMode) {
+        await endNativeAR();
         if (streamRef.current) {
           streamRef.current.getTracks().forEach(track => track.stop());
           streamRef.current = null;
@@ -205,6 +504,19 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
           videoRef.current.srcObject = null;
         }
         setCameraError(null);
+        setNativeARError(null);
+        return;
+      }
+
+      // Native immersive-ar first (real hit-test placement on any flat
+      // surface, table or floor); the camera preview is the graceful fallback.
+      if (xrSupported === true) {
+        const started = await startNativeAR();
+        if (!active) return;
+        if (started) return;
+        setNativeARError('Native AR could not start here. Showing camera preview fallback.');
+      } else if (xrSupported === null) {
+        // Probe still running; this effect re-runs when it resolves.
         return;
       }
 
@@ -246,7 +558,7 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
         streamRef.current = null;
       }
     };
-  }, [isARMode]);
+  }, [isARMode, xrSupported, endNativeAR, startNativeAR]);
 
   // Initialize Three.js Scene
   useEffect(() => {
@@ -423,14 +735,19 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
       // Older browsers: orientationchange listener above already covers rotation.
     }
 
-    // Animation Loop
-    let animationFrameId: number;
-    let clock = new THREE.Clock();
+    // Animation Loop (setAnimationLoop drives both studio rAF and XR sessions;
+    // three routes the XRFrame into the callback only while presenting).
+    const clock = new THREE.Clock();
 
-    const animate = () => {
-      animationFrameId = requestAnimationFrame(animate);
+    const animate = (_time = 0, frame?: unknown) => {
       const elapsedTime = clock.getElapsedTime();
+      // Immersive session: the headset/phone owns the camera — orbit framing
+      // never touches it. Viewer hit-test drives the reticle instead.
+      const presenting = renderer.xr.isPresenting === true;
 
+      if (presenting) {
+        runXRHitTest(elapsedTime, frame);
+      } else {
       // Sheet/modal framing: additive boost/shift lerped toward targets.
       // Base radius (sphericalRef) is user-owned; effective adds boost.
       const fr = framingRef.current;
@@ -461,11 +778,13 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
         cameraRef.current.lookAt(currentCamLookAtRef.current);
       }
 
-      // Reticle pulse animation in AR mode
+      // Reticle pulse animation in fallback preview mode (native sessions
+      // scale the reticle per-frame in runXRHitTest instead).
       if (reticleRef.current && reticleRef.current.visible) {
         const pulse = 1 + Math.sin(elapsedTime * 4) * 0.08;
         reticleRef.current.scale.set(pulse, 1, pulse);
       }
+      } // end studio/preview camera branch (XR sessions skip orbit framing)
 
       // Subtle levitation breath on exploded layers to give physical floating feel.
       // Static presentation props (plate/table) never wobble.
@@ -525,7 +844,17 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
       }
     };
 
-    animate();
+    // setAnimationLoop drives studio rendering and, once a session starts,
+    // the immersive XR frames (three injects the XRFrame into the callback).
+    const handleXRSessionStart = (): void => {
+      setIsPresenting(true);
+    };
+    const handleXRSessionEnd = (): void => {
+      setIsPresenting(false);
+    };
+    renderer.xr.addEventListener('sessionstart', handleXRSessionStart);
+    renderer.xr.addEventListener('sessionend', handleXRSessionEnd);
+    renderer.setAnimationLoop(animate);
 
     return () => {
       window.removeEventListener('resize', handleResize);
@@ -538,14 +867,24 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
           // Ignore cleanup failures on older browsers.
         }
       }
-      cancelAnimationFrame(animationFrameId);
+      try {
+        renderer.xr.removeEventListener('sessionstart', handleXRSessionStart);
+        renderer.xr.removeEventListener('sessionend', handleXRSessionEnd);
+      } catch {
+        // Ignore cleanup failures on older browsers.
+      }
+      renderer.setAnimationLoop(null);
+      // A live session is bound to this renderer: end it before disposal
+      // (dish switches cannot happen mid-session from the XR overlay, but
+      // unmount must never leak a session).
+      void endNativeAR();
       if (envTextureRef.current) {
         envTextureRef.current.dispose();
         envTextureRef.current = null;
       }
       renderer.dispose();
     };
-  }, [dish.id]);
+  }, [dish.id, endNativeAR, runXRHitTest]);
 
   // Update Dish 3D Model when dish changes or exclusions change.
   // Burger path kicks lazy per-slot GLB loads (stand-ins first); poke stays
@@ -565,6 +904,13 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     dishGroupRef.current = group;
     ingredientMeshesRef.current = ingredientMeshes;
     sceneRef.current.add(group);
+    // Rebuilt groups lose AR presentation: re-apply real-world scale and
+    // keep the studio-only wood table hidden while presenting.
+    applyARScale();
+    if (rendererRef.current?.xr.isPresenting === true) {
+      setWoodTableVisible(false);
+      if (studioFloorRef.current) studioFloorRef.current.visible = false;
+    }
 
     return () => {
       // Generation token++ discards late resolutions; dispose replaced
@@ -577,7 +923,7 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
         dishGroupRef.current = null;
       }
     };
-  }, [dish, handleScanStatus]);
+  }, [dish, handleScanStatus, applyARScale, setWoodTableVisible]);
 
   // Update Visibility of Excluded Ingredients (e.g. "Sin pepinillo" customizer).
   // Static props ignore exclusion toggles — they are never food.
@@ -595,17 +941,29 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   // Update Studio vs. AR Floor visibility.
   // Burger path stages on its own wood table, so the studio pedestal is
   // hidden for the burger only; the poke path keeps the pedestal untouched.
+  // Native sessions hide the pedestal for both dishes (real floor/table
+  // replaces it) and own the reticle per-frame in runXRHitTest.
   useEffect(() => {
     if (studioFloorRef.current) {
-      studioFloorRef.current.visible = !isARMode && dish.id !== 'wagyu-smash-burger';
+      studioFloorRef.current.visible =
+        !isARMode && !isPresenting && dish.id !== 'wagyu-smash-burger';
     }
     if (shadowPlaneRef.current) {
       shadowPlaneRef.current.visible = true; // Still catches shadows in both
     }
-    if (reticleRef.current) {
-      reticleRef.current.visible = isARMode && isPlacingOnSurface;
+    if (reticleRef.current && !isPresenting) {
+      // Fallback preview reticle only; while presenting the hit-test loop
+      // owns visibility (and no native session exists yet pre-present).
+      reticleRef.current.visible =
+        isARMode && isPlacingOnSurface && xrSessionRef.current === null;
     }
-  }, [isARMode, isPlacingOnSurface, dish.id]);
+  }, [isARMode, isPlacingOnSurface, dish.id, isPresenting]);
+
+  // Keep the user-adjustable AR scale applied (slider + pinch both land in
+  // arScale; applyARScale converts to meters while presenting).
+  useEffect(() => {
+    applyARScale();
+  }, [arScale, applyARScale]);
 
   // Update Exploded Positions Interpolation.
   // Static props (plate/table) never lerp — they stay put at 0 and at 1.
@@ -813,6 +1171,8 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     if (!el) return;
     const onWheelNative = (ev: WheelEvent) => {
       ev.preventDefault();
+      // Immersive sessions own the view; wheel never dollies XR.
+      if (isPresentingXR()) return;
       // Normalize deltaMode (Firefox line scroll) to pixels.
       const deltaY = ev.deltaMode === 1 ? ev.deltaY * 16 : ev.deltaY;
       sphericalRef.current.radius = clampRadius(
@@ -833,12 +1193,23 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
   // - tap (short + small move + no pinch) -> raycast select burger /
   //   deselect background (never zooms, never rotates)
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    // Let overlay buttons (spatial pins, AR anchor) handle their own press:
-    // a pointer starting on a <button> must not start rotate/pinch/tap.
-    if ((e.target as HTMLElement).closest?.('button')) return;
+    // Let overlay buttons/inputs (spatial pins, AR anchor, AR scale slider)
+    // handle their own press: a pointer starting on them must not start
+    // rotate/pinch/tap. AR control wrappers carry data-ar-ui for the same.
+    if ((e.target as HTMLElement).closest?.('button, input, [data-ar-ui]')) return;
     // Card resize handles own their gesture: never rotate/pinch/tap.
     if ((e.target as HTMLElement).closest?.('[data-resize-handle]')) return;
     if (isCardResizing()) return;
+    // Immersive session: no orbit — track pointers for pinch-to-scale only
+    // (tap-to-place arrives as the session 'select' event, not a raycast).
+    if (isPresentingXR()) {
+      activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (activePointersRef.current.size === 2) {
+        didPinchRef.current = true;
+        pinchPrevDistRef.current = getActivePinchDist();
+      }
+      return;
+    }
     activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     try {
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
@@ -882,16 +1253,21 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
 
     // Pinch zoom takes over whenever two pointers are down.
     // User pinch always wins over sheet auto-framing (boost is additive,
-    // never overwritten here).
+    // never overwritten here). While presenting, pinch adjusts AR dish scale
+    // instead (orbit/zoom are owned by the XR session).
     if (activePointersRef.current.size >= 2) {
       const dist = getActivePinchDist();
       if (dist !== null) {
         if (pinchPrevDistRef.current !== null) {
           const delta = dist - pinchPrevDistRef.current;
-          sphericalRef.current.radius = clampRadius(
-            sphericalRef.current.radius - delta * PINCH_FACTOR
-          );
-          framingRef.current.userTouchedSinceAuto = true;
+          if (isPresentingXR()) {
+            setArScale((v) => clampARScale(v - delta * 0.002));
+          } else {
+            sphericalRef.current.radius = clampRadius(
+              sphericalRef.current.radius - delta * PINCH_FACTOR
+            );
+            framingRef.current.userTouchedSinceAuto = true;
+          }
         }
         pinchPrevDistRef.current = dist;
       }
@@ -926,8 +1302,9 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
 
     if (activePointersRef.current.size === 0) {
       // Gesture fully ended: tap-select only when it was a short, small,
-      // non-pinch single-pointer touch.
-      if (hadPointer && !wasPinch && isInteractingRef.current) {
+      // non-pinch single-pointer touch. Skipped while presenting (placement
+      // arrives as the session 'select' event, never a studio raycast).
+      if (hadPointer && !wasPinch && isInteractingRef.current && !isPresentingXR()) {
         const elapsed = Date.now() - dragStartRef.current.time;
         const moveDist = Math.hypot(
           e.clientX - dragStartRef.current.x,
@@ -1010,16 +1387,64 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
     onSelectIngredient(null);
   };
 
-  // Handle AR Surface Anchor Lock
+  // Handle AR Surface Anchor Lock.
+  // Native session: anchor at the live hit-test pose (any flat surface the
+  // device tracks). Fallback preview: lock the studio staging in place.
   const handleAnchorARPlate = () => {
+    if (isPresentingXR() && hitPoseRef.current.has) {
+      placeDishAtHit();
+      return;
+    }
     setIsPlacingOnSurface(false);
     setIsARPlaced(true);
   };
 
   const handleResetARAnchor = () => {
+    if (isPresentingXR()) {
+      // Back to hit-test targeting; the reticle loop resumes next frame.
+      hitPoseRef.current.has = false;
+    }
     setIsPlacingOnSurface(true);
     setIsARPlaced(false);
   };
+
+  // Leave the immersive session (system 'end' exits AR mode for us).
+  const handleExitNativeAR = () => {
+    const session = xrSessionRef.current;
+    if (session) {
+      session.end().catch(() => {
+        // Already ended; the 'end' handler still runs its cleanup.
+      });
+    } else {
+      onToggleARMode(false);
+    }
+  };
+
+  // On-screen dish-size control: 44px+ touch target, pinch alternative, and
+  // the only scaler reachable inside the XR DOM overlay (header is hidden
+  // there). Percentage is relative to real-world scale while presenting.
+  const renderARScaleControl = () => (
+    <div
+      data-ar-ui
+      className="flex items-center gap-2 bg-stone-900/90 backdrop-blur-md border border-white/15 px-4 py-1 rounded-full shadow-xl"
+    >
+      <span className="text-[11px] text-stone-300 font-medium whitespace-nowrap">Size</span>
+      <input
+        id="ar-scale-slider"
+        type="range"
+        min={AR_SCALE_MIN}
+        max={AR_SCALE_MAX}
+        step={0.05}
+        value={arScale}
+        onChange={(e) => setArScale(clampARScale(Number(e.target.value)))}
+        aria-label="Dish size in AR"
+        className="w-32 sm:w-40 accent-amber-500 min-h-[44px]"
+      />
+      <span className="text-[11px] text-amber-300 font-semibold w-10 text-right">
+        {Math.round(arScale * 100)}%
+      </span>
+    </div>
+  );
 
   return (
     <div
@@ -1100,34 +1525,80 @@ export const WebARCanvas: React.FC<WebARCanvasProps> = ({
         </div>
       )}
 
-      {/* AR Surface Targeting & Placement Bar */}
+      {/* AR Surface Targeting & Placement Bar (also served inside the XR DOM
+          overlay while presenting: header and sheets stay hidden there, so
+          place/scale/exit controls must live in this container). */}
       {isARMode && isPlacingOnSurface && (
         <div className="absolute inset-x-2 sm:inset-x-auto bottom-[calc(6rem+env(safe-area-inset-bottom))] sm:bottom-24 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-3 w-[calc(100%-1rem)] sm:w-auto">
           <div className="bg-stone-900/90 backdrop-blur-md border border-amber-500/30 px-4 py-2 rounded-full text-xs text-amber-200 shadow-xl flex items-center gap-2 whitespace-nowrap max-w-full overflow-hidden text-ellipsis">
             <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
-            <span className="truncate">Apunta la cámara a tu mesa o mantel</span>
+            <span className="truncate">
+              {isPresenting
+                ? 'Point at any flat surface — table or floor — then place'
+                : 'Apunta la cámara a tu mesa o mantel'}
+            </span>
           </div>
           <button
             id="anchor-plate-button"
             onClick={handleAnchorARPlate}
             className="min-h-[44px] px-6 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-stone-950 font-semibold text-sm rounded-full shadow-lg shadow-amber-500/25 transition-all transform active:scale-95 flex items-center gap-2 border border-amber-300/40"
           >
-            <span>Fijar Plato en Superficie</span>
+            <span>{isPresenting ? 'Place Dish Here' : 'Fijar Plato en Superficie'}</span>
             <span className="text-base">📍</span>
           </button>
+          {renderARScaleControl()}
+          {isPresenting && (
+            <button
+              id="ar-exit-button"
+              onClick={handleExitNativeAR}
+              className="min-h-[44px] px-4 py-2 bg-stone-900/80 hover:bg-stone-800 border border-white/15 backdrop-blur-md rounded-full text-xs text-stone-300 transition-all active:scale-95"
+            >
+              Exit AR
+            </button>
+          )}
+          {!isPresenting && xrSupported === false && (
+            <p
+              id="ar-fallback-note"
+              className="text-[11px] text-stone-400 bg-stone-900/80 backdrop-blur-md border border-white/10 px-3 py-1.5 rounded-full"
+            >
+              Native AR is not available on this device — preview mode.
+            </p>
+          )}
+          {!isPresenting && nativeARError && (
+            <p
+              id="ar-native-error"
+              className="text-[11px] text-amber-300/90 bg-stone-900/80 backdrop-blur-md border border-amber-500/30 px-3 py-1.5 rounded-full text-center"
+            >
+              {nativeARError}
+            </p>
+          )}
         </div>
       )}
 
-      {/* AR Relocate button if already anchored */}
+      {/* AR Relocate + size controls once anchored */}
       {isARMode && !isPlacingOnSurface && (
-        <button
-          id="reanchor-ar-button"
-          onClick={handleResetARAnchor}
-          className="absolute z-20 min-h-[44px] px-3 py-2 bg-stone-900/80 hover:bg-stone-800 border border-white/15 backdrop-blur-md rounded-xl text-xs text-stone-300 transition-all flex items-center gap-1.5 top-[calc(env(safe-area-inset-top)+64px)] right-2 sm:top-20 sm:right-4"
-        >
-          <span>Mover a otra mesa</span>
-          <span className="text-amber-400">↻</span>
-        </button>
+        <div className="absolute inset-x-2 sm:inset-x-auto bottom-[calc(6rem+env(safe-area-inset-bottom))] sm:bottom-24 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-3 w-[calc(100%-1rem)] sm:w-auto">
+          {renderARScaleControl()}
+          <div className="flex items-center gap-2">
+            <button
+              id="reanchor-ar-button"
+              onClick={handleResetARAnchor}
+              className="min-h-[44px] px-3 py-2 bg-stone-900/80 hover:bg-stone-800 border border-white/15 backdrop-blur-md rounded-xl text-xs text-stone-300 transition-all flex items-center gap-1.5"
+            >
+              <span>{isPresenting ? 'Move dish' : 'Mover a otra mesa'}</span>
+              <span className="text-amber-400">↻</span>
+            </button>
+            {isPresenting && (
+              <button
+                id="ar-exit-button"
+                onClick={handleExitNativeAR}
+                className="min-h-[44px] px-4 py-2 bg-stone-900/80 hover:bg-stone-800 border border-white/15 backdrop-blur-md rounded-xl text-xs text-stone-300 transition-all active:scale-95"
+              >
+                Exit AR
+              </button>
+            )}
+          </div>
+        </div>
       )}
 
       {/* Scan pipeline statuses (burger path only): per-layer loading / ready /

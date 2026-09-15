@@ -206,9 +206,20 @@ export async function loadIngredient(slot: ScanSlot, _generation: number): Promi
 
   const group = new THREE.Group();
   group.name = slot.ingredientId;
+  // normalizeScan bakes XZ-center + minY=0 into the children but leaves the
+  // uniform fit scale on the parsed root. Reparenting the children straight
+  // into a fresh scale-1 group would silently drop that scale (a meter-scale
+  // photogrammetry scan would render ~10x tiny next to procedural props), so
+  // the children stay under an inner holder that carries the fitted scale.
+  // Callers move `group.children` (the holder) and the fit survives every
+  // swap path (first landing, retry, per-ingredient slots).
+  const fitted = new THREE.Group();
+  fitted.name = `${slot.ingredientId}-scan-fit`;
+  fitted.scale.copy(parsed.scene.scale);
   for (const child of [...parsed.scene.children]) {
-    group.add(child);
+    fitted.add(child);
   }
+  group.add(fitted);
   return group;
 }
 

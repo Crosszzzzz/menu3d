@@ -280,11 +280,14 @@ function paintCeramicGlaze(ctx: CanvasRenderingContext2D, s: number): void {
 /**
  * Builds the 3D visual representation of a dish.
  *
- * Burger path: returns sync TEMP procedural stand-ins for the 5 scan slots
- * (clamped to the SCAN_SLOTS anchor table) and kicks 5 lazy per-ingredient
- * GLB loads that swap in place on resolve. Group identity stays stable so
+ * Burger path: renders the procedural burger SYNCHRONOUSLY as an instant
+ * stand-in, then swaps the 9 food-stack layers for the single whole-burger
+ * photogrammetry scan (`public/models/hamburguesa-completa.glb`, loaded via
+ * the assetLoader fetch+parse pipeline). Group identity stays stable so
  * exploded lerp, raycast, pins, exclusion, AR scale, and auto-fit never
- * change. Poke path is untouched (fully synchronous, no scans).
+ * change. If the scan fails, the procedural stand-in simply stays (fallback)
+ * and onStatus reports the error for retry. Poke path is untouched (fully
+ * synchronous, no scans).
  */
 export interface BuildDishOptions {
   onStatus?: (ingredientId: string, status: IngredientLoadStatus, error?: string) => void;
@@ -310,7 +313,7 @@ export function buildDish3DModel(
   const ingredientMeshes = new Map<string, THREE.Object3D>();
 
   if (dish.id === 'wagyu-smash-burger') {
-    buildBurgerModel(dish, group, ingredientMeshes, opts);
+    buildScannedBurgerModel(dish, group, ingredientMeshes, opts);
   } else {
     buildPokeModel(dish, group, ingredientMeshes);
   }
@@ -413,7 +416,8 @@ function buildBurgerModel(
   dish: Dish,
   parentGroup: THREE.Group,
   ingredientMeshes: Map<string, THREE.Object3D>,
-  opts?: BuildDishOptions
+  opts?: BuildDishOptions,
+  kickPerIngredientScans = true
 ) {
   const brioche = makePBRSet(paintBrioche, {
     size: 1024,
@@ -947,6 +951,176 @@ function buildBurgerModel(
 }
 
 /**
+ * Whole-burger scan path (single GLB replaces the 9-layer food stack).
+ *
+ * The scan (`public/models/hamburguesa-completa.glb`, 55k tris / 1.8MB,
+ * diffuse+normal JPEG) is ONE fused mesh: per-layer explode, per-layer pins,
+ * and per-layer exclusion cannot apply to it. It is therefore registered in
+ * `ingredientMeshes` under the single key 'bun-bottom' (assembled anchor
+ * [0, 0.02, 0] = plate level, so the normalized scan with baked minY=0 sits
+ * exactly where the procedural stack sat). Consequences, all safe by
+ * construction (missing ids are skipped, never dereferenced):
+ * - explode-lerp / levitation / pins / raycast treat the whole burger as the
+ *   bottom bun (one chunk, one pin, selects the 'bun-bottom' ingredient);
+ * - excluding any replaced layer id is a no-op after the swap, except
+ *   'bun-bottom' which hides the whole burger;
+ * - ceramic plate and wood table stay procedural (the scan has none); the
+ *   procedural fries basket is hidden by default on this path (see
+ *   SHOW_FRIES_WITH_WHOLE_SCAN) so it never dwarfs the real-scale scan.
+ */
+const WHOLE_BURGER_SLOT: ScanSlot = {
+  ingredientId: 'bun-bottom',
+  file: 'hamburguesa-completa.glb',
+  targetDiameter: 2.6,
+};
+
+/** Procedural stack layers removed from the scene once the whole scan lands. */
+const WHOLE_BURGER_REPLACED_IDS = [
+  'bun-top',
+  'sauce-truffle',
+  'pickles',
+  'tomato-heirloom',
+  'lettuce-batavia',
+  'cheddar-melt',
+  'meat-wagyu-patty',
+  'onion-caramelized',
+  'bun-bottom',
+];
+
+/**
+ * Fries visibility for the whole-scan burger path. The scan ships no fries,
+ * plate, or table, and the procedural basket dwarfed the real-scale scan, so
+ * it stays hidden by default (stand-in phase and post-swap alike). Set to
+ * true to bring the basket back. Poke and dishes.ts are unaffected.
+ */
+const SHOW_FRIES_WITH_WHOLE_SCAN = false;
+
+/** Extra ids dropped alongside the stack while fries stay hidden. */
+function wholeBurgerHiddenIds(): string[] {
+  return SHOW_FRIES_WITH_WHOLE_SCAN
+    ? WHOLE_BURGER_REPLACED_IDS
+    : [...WHOLE_BURGER_REPLACED_IDS, 'french-fries'];
+}
+
+/** Remove one procedural group now (stand-in phase), keeping shared textures. */
+function removeProceduralGroup(
+  ingredientMeshes: Map<string, THREE.Object3D>,
+  ingredientId: string
+): void {
+  const grp = ingredientMeshes.get(ingredientId);
+  if (!grp) return;
+  const live = [...ingredientMeshes.values()].filter((g) => g !== grp);
+  grp.parent?.remove(grp);
+  disposeGroup(grp, collectLiveTextures(live));
+  ingredientMeshes.delete(ingredientId);
+}
+
+function buildScannedBurgerModel(
+  dish: Dish,
+  parentGroup: THREE.Group,
+  ingredientMeshes: Map<string, THREE.Object3D>,
+  opts?: BuildDishOptions
+) {
+  // Instant procedural stand-in (also the permanent fallback on load error).
+  // Per-ingredient slot kicks stay OFF: those 5 GLBs were never produced and
+  // would only 404 against public/models/.
+  buildBurgerModel(dish, parentGroup, ingredientMeshes, opts, false);
+  // Fries OFF by default on the scan path: drop the stand-in basket now so
+  // the loading state already matches the final plating.
+  if (!SHOW_FRIES_WITH_WHOLE_SCAN) {
+    removeProceduralGroup(ingredientMeshes, 'french-fries');
+  }
+  swapWholeBurgerScan(dish, ingredientMeshes, scanGeneration, opts?.onStatus);
+}
+
+/**
+ * Async whole-burger swap. Reuses the assetLoader fetch -> byte-cap ->
+ * parse -> tri-cap -> normalize(2.6u) -> env-clamp pipeline via a synthetic
+ * single-file slot, and the shared scanGeneration token so dish switches
+ * discard late resolutions. Failures keep the procedural stand-in + report
+ * 'error' on the slot id for the existing retry chip.
+ */
+function swapWholeBurgerScan(
+  dish: Dish,
+  ingredientMeshes: Map<string, THREE.Object3D>,
+  generation: number,
+  onStatus?: BuildDishOptions['onStatus']
+): void {
+  const anchor = ingredientMeshes.get(WHOLE_BURGER_SLOT.ingredientId);
+  const parentGroup = anchor?.parent as THREE.Group | null;
+  if (!anchor || !parentGroup) return;
+  onStatus?.(WHOLE_BURGER_SLOT.ingredientId, 'loading');
+  loadIngredient(WHOLE_BURGER_SLOT, generation).then(
+    (scanned) => {
+      if (generation !== scanGeneration) {
+        disposeGroup(scanned);
+        return;
+      }
+      const current = ingredientMeshes.get(WHOLE_BURGER_SLOT.ingredientId);
+      const parent = current?.parent as THREE.Group | null;
+      if (!current || !parent) {
+        disposeGroup(scanned);
+        return;
+      }
+      if (current.userData.isWholeBurgerScan === true) {
+        // Retry-after-success: replace children in place, holder identity
+        // (position anchor, raycast/pins references) survives untouched.
+        const live = [...ingredientMeshes.values()].filter((g) => g !== current);
+        const liveTextures = collectLiveTextures(live);
+        for (const child of [...current.children]) {
+          current.remove(child);
+          disposeGroup(child, liveTextures);
+        }
+        for (const child of [...scanned.children]) {
+          current.add(child);
+        }
+        disposeGroup(scanned);
+      } else {
+        // First landing: drop the 9 procedural stack groups (plus the fries
+        // basket while SHOW_FRIES_WITH_WHOLE_SCAN is false), keep plate +
+        // table (their textures stay live via the keep-set).
+        const hiddenIds = wholeBurgerHiddenIds();
+        const survivors = [...ingredientMeshes.values()].filter(
+          (g) => !hiddenIds.includes(g.userData?.ingredientId)
+        );
+        const liveTextures = collectLiveTextures(survivors);
+        for (const id of hiddenIds) {
+          const grp = ingredientMeshes.get(id);
+          if (!grp) continue;
+          grp.parent?.remove(grp);
+          disposeGroup(grp, liveTextures);
+          ingredientMeshes.delete(id);
+        }
+        const holder = new THREE.Group();
+        holder.name = 'scan-whole-burger';
+        const ing = dish.ingredients.find((i) => i.id === WHOLE_BURGER_SLOT.ingredientId);
+        holder.userData = {
+          ingredientId: WHOLE_BURGER_SLOT.ingredientId,
+          name: ing?.name ?? 'Scanned burger',
+          isWholeBurgerScan: true,
+        };
+        for (const child of [...scanned.children]) {
+          holder.add(child);
+        }
+        disposeGroup(scanned);
+        if (ing) holder.position.set(...ing.assembledPosition);
+        parent.add(holder);
+        ingredientMeshes.set(WHOLE_BURGER_SLOT.ingredientId, holder);
+      }
+      onStatus?.(WHOLE_BURGER_SLOT.ingredientId, 'ready');
+    },
+    (err: unknown) => {
+      if (generation !== scanGeneration) return;
+      onStatus?.(
+        WHOLE_BURGER_SLOT.ingredientId,
+        'error',
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+  );
+}
+
+/**
  * Uniformly scale a TEMP stand-in group so its horizontal diameter matches
  * the scan anchor table (tolerance +/-5% after swap). Applied before the
  * group position is anchored, so the dishes.ts anchor is preserved.
@@ -1041,6 +1215,17 @@ export function retryScannedSlot(
   ingredientMeshes: Map<string, THREE.Object3D>,
   onStatus?: BuildDishOptions['onStatus']
 ): void {
+  // Whole-burger path: any replaced stack layer (or the slot id itself)
+  // reloads the single GLB; per-ingredient slots are legacy for this dish.
+  if (
+    dish.id === 'wagyu-smash-burger' &&
+    (ingredientId === WHOLE_BURGER_SLOT.ingredientId ||
+      WHOLE_BURGER_REPLACED_IDS.includes(ingredientId))
+  ) {
+    if (!ingredientMeshes.has(WHOLE_BURGER_SLOT.ingredientId)) return;
+    swapWholeBurgerScan(dish, ingredientMeshes, scanGeneration, onStatus);
+    return;
+  }
   const slot = getScanSlot(ingredientId);
   if (!slot || !ingredientMeshes.has(ingredientId)) return;
   swapScannedIntoSlot(slot, dish, ingredientMeshes, scanGeneration, onStatus);
